@@ -73,6 +73,36 @@ function MigrateCard({ caps, run }) {
   );
 }
 
+function QuantumCard({ caps, run }) {
+  const [source, setSource] = useState("simulated");
+  const [backend, setBackend] = useState("aer");
+  const disabled = !caps || !caps.jobs;
+  const ibmOk = caps && caps.ibm && caps.ibm.ok;
+  const qOk = caps && caps.quantum && caps.quantum.ok;
+  const ibmLabel = ibmOk || !caps || !caps.ibm ? "IBM quantum hardware" : `IBM quantum hardware — ${caps.ibm.detail}`;
+  return (
+    <form className="run-card" onSubmit={(e) => { e.preventDefault(); run({ kind: "entropy", source }); }}>
+      <h3>3 · Quantum</h3>
+      <label htmlFor="ent-source">Entropy source</label>
+      <select id="ent-source" value={source} disabled={disabled} onChange={(e) => setSource(e.target.value)}>
+        <option value="simulated">Simulator (~5 s, not quantum)</option>
+        <option value="ibm" disabled={!ibmOk}>{ibmOk ? "IBM quantum hardware (may queue)" : ibmLabel}</option>
+      </select>
+      <div className="btns">
+        <button type="submit" disabled={disabled || !qOk} title={qOk || !caps || !caps.quantum ? "" : caps.quantum.detail}>Run entropy job</button>
+      </div>
+      <label htmlFor="shor-backend">Shor's algorithm (N = 15)</label>
+      <select id="shor-backend" value={backend} disabled={disabled} onChange={(e) => setBackend(e.target.value)}>
+        <option value="aer">Simulator</option>
+        <option value="ibm" disabled={!ibmOk}>{ibmLabel}</option>
+      </select>
+      <div className="btns">
+        <button type="button" className="ghost" disabled={disabled || !qOk} onClick={() => run({ kind: "shor", backend })}>Run Shor</button>
+      </div>
+    </form>
+  );
+}
+
 function MeasureCard({ caps, run }) {
   const [url, setUrl] = useState("");
   const [n, setN] = useState(200);
@@ -84,7 +114,7 @@ function MeasureCard({ caps, run }) {
       if (!url.trim()) { alert("Enter an https:// URL of a server to benchmark."); return; }
       run({ kind: "benchmark", url: url.trim(), n: Number(n) || 200, method });
     }}>
-      <h3>3 · Measure</h3>
+      <h3>4 · Measure</h3>
       <label htmlFor="bench-url">Handshake benchmark: a PQ-ready HTTPS server</label>
       <input id="bench-url" type="url" placeholder="https://cloudflare.com/" spellCheck={false} disabled={disabled}
         value={url} onChange={(e) => setUrl(e.target.value)} />
@@ -180,6 +210,7 @@ export default function Run({ client, caps, jobs, pending, loadJobs, signOut }) 
       <div className="run-grid">
         <ScanCard caps={caps} run={run} />
         <MigrateCard caps={caps} run={run} />
+        <QuantumCard caps={caps} run={run} />
         <MeasureCard caps={caps} run={run} />
       </div>
 

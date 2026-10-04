@@ -5,12 +5,13 @@ import Overview from "./Overview.jsx";
 import Run from "./Run.jsx";
 import Approvals from "./Approvals.jsx";
 import Measure from "./Measure.jsx";
+import Quantum from "./Quantum.jsx";
 import Audit from "./Audit.jsx";
 
 const TABS = [
-  ["overview", "Overview"], ["run", "Run"], ["approvals", "Approvals"], ["measure", "Measurements"], ["audit", "Audit log"],
+  ["overview", "Overview"], ["run", "Run"], ["approvals", "Approvals"], ["quantum", "Quantum"], ["measure", "Measurements"], ["audit", "Audit log"],
 ];
-const TAB_OF = { "": "overview", overview: "overview", top: "overview", risk: "overview", run: "run", approvals: "approvals", measure: "measure", audit: "audit" };
+const TAB_OF = { "": "overview", overview: "overview", top: "overview", risk: "overview", run: "run", approvals: "approvals", quantum: "quantum", "entropy-section": "quantum", "shor-section": "quantum", measure: "measure", audit: "audit" };
 
 function useHashTab() {
   const read = () => TAB_OF[location.hash.replace(/^#/, "")] || "overview";
@@ -77,7 +78,7 @@ function Dashboard({ client, who, signOut }) {
   const [audit, setAudit] = useState({ rows: [], verify: null });
   const [caps, setCaps] = useState(null);
   const [jobs, setJobs] = useState([]);
-  const [extras, setExtras] = useState({ realworld: null, benchmark: null });
+  const [extras, setExtras] = useState({ realworld: null, benchmark: null, entropy: null, shor: null });
   const seen = useRef({});
   const zSet = useRef(false);
 
@@ -103,8 +104,10 @@ function Dashboard({ client, who, signOut }) {
   }), [client, guarded]);
 
   const loadExtras = useCallback(() => guarded(async () => {
-    const [realworld, benchmark] = await Promise.all([client.api("/api/realworld"), client.api("/api/benchmark")]);
-    setExtras({ realworld, benchmark });
+    const [realworld, benchmark, entropy, shor] = await Promise.all([
+      client.api("/api/realworld"), client.api("/api/benchmark"), client.api("/api/entropy"), client.api("/api/shor"),
+    ]);
+    setExtras({ realworld, benchmark, entropy, shor });
   }), [client, guarded]);
 
   const refreshResults = useCallback(() => {
@@ -168,6 +171,7 @@ function Dashboard({ client, who, signOut }) {
           <Run client={client} caps={caps} jobs={jobs} pending={pending} loadJobs={loadJobs} signOut={signOut} />
         )}
         {tab === "approvals" && <Approvals client={client} approvals={approvals} reload={loadApprovals} />}
+        {tab === "quantum" && <Quantum entropy={extras.entropy} shor={extras.shor} />}
         {tab === "measure" && <Measure realworld={extras.realworld} benchmark={extras.benchmark} />}
         {tab === "audit" && <Audit rows={audit.rows} />}
       </main>
