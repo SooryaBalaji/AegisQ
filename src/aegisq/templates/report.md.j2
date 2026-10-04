@@ -1,0 +1,103 @@
+# AegisQ post-quantum migration report
+
+Generated {{ generated_at }} by AegisQ {{ version }}.
+Audit log: {% if audit.ok %}**intact** ({{ audit.entries }} entries, {{ "HMAC-keyed" if audit.keyed else "SHA-256" }} hash chain){% else %}**TAMPERED OR CORRUPT**: {{ audit.error }}{% endif %}.
+
+{% if scan %}
+## Summary
+
+Scan `{{ scan.id[:12] }}` finished {{ scan.finished }}: {{ scan.summary.total }} services, {{ scan.scanned }} reachable.
+
+| Status | Count |
+|---|---|
+| Post-quantum ready | {{ scan.summary.pq_ready }} |
+| Classical key exchange only | {{ scan.summary.classical }} |
+| TLS 1.2 only | {{ scan.summary.tls12_only }} |
+| Legacy TLS 1.0/1.1 only | {{ scan.summary.legacy_tls }} |
+| Plaintext HTTP | {{ scan.summary.plaintext }} |
+| Unreachable / error | {{ scan.summary.unreachable + scan.summary.error }} |
+
+**{{ scan.ready_pct }}%** of reachable services complete a hybrid ML-KEM key exchange.
+At Z = {{ z }} years, **{{ scan.at_risk }}** services have data that is already at risk (X + Y > Z).
+
+## Risk ranking (Mosca: margin = X + Y − Z, Z = {{ z }})
+
+| # | Service | Status | Data | X | Y | Margin | Severity | At risk for any Z below |
+|---|---|---|---|---|---|---|---|---|
+{% for r in ranking %}
+| {{ r.rank }} | {{ r.service }} | {{ r.status }} | {{ r.data_category }} | {{ r.x_retention }} | {{ r.y_migration }} | {{ "%+.1f"|format(r.margin) }} | {{ r.severity }} | {{ "-" if r.severity in ("none", "unknown") else ("always" if r.breaks_even_z is none else r.breaks_even_z) }} |
+{% endfor %}
+{% endif %}
+
+## Migration actions
+
+{% if timeline %}
+{% for svc, events in timeline.items() %}
+### {{ svc }}{% if outcomes.get(svc) %} — {{ outcomes[svc] }}{% endif %}
+
+{% for e in events %}
+- `{{ e.ts }}` ({{ e.actor }}) {{ e.text }}
+{% endfor %}
+
+{% endfor %}
+{% else %}
+No migration actions recorded yet.
+{% endif %}
+
+{% if findings %}
+## Findings
+
+{% for svc, items in findings.items() %}
+**{{ svc }}**
+{% for f in items %}
+- {{ f }}
+{% endfor %}
+
+{% endfor %}
+{% endif %}
+{% if cbom %}
+## Cryptographic Bill of Materials
+
+`{{ cbom.file }}`: CycloneDX {{ cbom.spec }}, {{ cbom.components }} cryptographic assets, schema validation **{{ "passed" if cbom.valid else "FAILED" }}**.
+{% endif %}
+
+{% if realworld %}
+## Real-world adoption gap (Tranco)
+
+| Group | Sites | Reachable | PQ ready | Share |
+|---|---|---|---|---|
+{% for g in realworld.groups %}
+| {{ g.label }} | {{ g.sites }} | {{ g.reachable }} | {{ g.pq_ready }} | {{ g.pq_pct }}% |
+{% endfor %}
+
+Tranco list {{ realworld.list_id }}; scan took {{ realworld.duration_s }} s.
+{% endif %}
+
+{% if benchmark %}
+## Handshake cost (measured)
+
+| Setting | n | p50 (ms) | p99 (ms) | Failures |
+|---|---|---|---|---|
+{% for b in benchmark.results %}
+| {{ b.label }} | {{ b.n }} | {{ b.p50_ms }} | {{ b.p99_ms }} | {{ b.failures }} |
+{% endfor %}
+
+{{ benchmark.caveat }}
+{% endif %}
+
+{% if entropy %}
+## Quantum entropy
+
+Source: {{ entropy.source }}{% if entropy.job_id %}, IBM job `{{ entropy.job_id }}` on {{ entropy.backend }}{% endif %}{% if entropy.simulated %} (**SIMULATED: not quantum randomness**){% endif %}.
+Raw bits: {{ entropy.raw_bits }}; min-entropy bound h = {{ "%.4f"|format(entropy.h_min) }} per bit; extracted {{ entropy.extracted_bits }} bits at ε = 2^-{{ entropy.eps_bits }}.
+{% endif %}
+
+## Where the Z assumption comes from
+
+| Estimate | Target | Logical qubits | Physical qubits | Runtime |
+|---|---|---|---|---|
+{% for e in estimates %}
+| {{ e.estimate }} | {{ e.target }} | {{ e.logical_qubits }} | {{ e.physical_qubits }} | {{ e.runtime }} |
+{% endfor %}
+
+{{ estimate_note }}

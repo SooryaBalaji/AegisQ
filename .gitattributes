@@ -1,0 +1,4 @@
+# Keep LF endings on every platform: nginx configs, shell scripts and Dockerfiles break with CRLF.
+* text=auto eol=lf
+*.png binary
+*.zip binary

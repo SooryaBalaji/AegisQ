@@ -1,0 +1,80 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e ".[dev,agent]"
+      - run: ruff check src tests && ruff format --check src tests
+      - run: python -m mypy
+      - run: python -m pytest --cov --cov-report=term-missing
+
+  # Native Windows and macOS: pip install + the full unit suite, no Docker.
+  other-os:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ".[dev,agent]"
+      - run: python -m pytest -q
+      - name: CLI smoke test
+        run: |
+          aegisq --version
+          aegisq doctor
+          aegisq audit verify
+
+  quantum:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ".[dev,quantum]"
+      - run: python -m pytest tests/test_entropy.py -m "quantum or not quantum"
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ".[dev]"
+      - run: make demo-up
+      - run: sleep 5 && python -m pytest -m integration
+      - name: Reference-tool backends in the AegisQ image (OpenSSL 3.5, OpenSSH 10)
+        run: |
+          docker build -t aegisq:ci .
+          docker run --rm --network host -v "$PWD/demo:/demo:ro" aegisq:ci \
+            scan /demo/fleet.yaml --tls-backend openssl --ssh-backend openssh --cross-check
+      - name: k6 load-test smoke (dashboard API, approval race, auth throttle, TLS handshakes)
+        run: make loadtest-smoke
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-summaries
+          path: loadtest/out/*.json
+      - if: always()
+        run: make demo-down

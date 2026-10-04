@@ -1,0 +1,99 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aegisq"
+version = "1.0.0"
+description = "Post-quantum readiness scanner, CBOM generator, Mosca risk scorer and human-approved migration agent."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "AegisQ contributors" }]
+keywords = ["post-quantum", "ml-kem", "tls", "ssh", "cbom", "cyclonedx", "security"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Security :: Cryptography",
+  "Environment :: Console",
+  "Framework :: FastAPI",
+]
+dependencies = [
+  "cryptography>=43",
+  "pydantic>=2.6",
+  "PyYAML>=6.0",
+  "click>=8.1",
+  "jsonschema>=4.21",
+  "referencing>=0.31",
+  "Jinja2>=3.1",
+  "numpy>=1.26",
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+]
+
+[project.optional-dependencies]
+agent = ["anthropic>=0.70"]
+quantum = ["qiskit>=1.2", "qiskit-aer>=0.15", "qiskit-ibm-runtime>=0.30"]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "pytest-cov>=5",
+  "httpx>=0.27",
+  "ruff==0.16.10",  # pinned: new ruff releases add rules and would turn CI red without code changes
+  "mypy>=1.10",
+  "types-PyYAML",
+]
+all = ["aegisq[agent,quantum]"]
+
+[project.scripts]
+aegisq = "aegisq.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+aegisq = ["schemas/*.json", "web/static/*", "templates/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "integration: needs Docker and the demo fleet images (deselect with -m 'not integration')",
+  "quantum: needs qiskit / qiskit-aer",
+]
+addopts = "-ra -m 'not integration'"
+filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "ASYNC", "PL"]
+ignore = [
+  "S101",     # asserts are fine in tests
+  "S603",     # subprocess without shell is the point; inputs are validated
+  "S607",     # partial executable paths (nginx, ssh, docker) are configured on purpose
+  "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR2004",
+  "RUF001", "RUF002", "RUF003",
+  "S311",     # random is used for sampling, never for keys
+  "PLC0415",  # lazy imports keep CLI startup fast and extras optional
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "PLR", "B", "SIM", "RUF043", "ASYNC240", "RUF005", "E501"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["aegisq"]
+mypy_path = "src"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
+no_implicit_optional = true
+
+[tool.coverage.run]
+source = ["aegisq"]
+branch = true

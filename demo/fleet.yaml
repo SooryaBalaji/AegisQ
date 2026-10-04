@@ -1,0 +1,59 @@
+# AegisQ demo inventory. Paths are relative to this file.
+# `managed` blocks are the ONLY services the migration agent may change; commands are argv lists.
+defaults:
+  host: 127.0.0.1
+  sni: localhost
+  protocol: tls
+
+services:
+  - name: app-modern
+    port: 8443
+    data_category: health
+    owner: clinical-platform
+    managed:
+      config_path: fleet/app-modern/conf.d/site.conf
+      test_cmd: [docker, exec, aegisq-app-modern, nginx, -t]
+      reload_cmd: [docker, exec, aegisq-app-modern, nginx, -s, reload]
+      version_cmd: [docker, exec, aegisq-app-modern, nginx, -V]
+
+  - name: app-legacy
+    port: 8444
+    data_category: payments
+    owner: billing
+    managed:
+      config_path: fleet/app-legacy/conf.d/site.conf
+      test_cmd: [docker, exec, aegisq-app-legacy, nginx, -t]
+      reload_cmd: [docker, exec, aegisq-app-legacy, nginx, -s, reload]
+      version_cmd: [docker, exec, aegisq-app-legacy, nginx, -V]
+
+  - name: app-tls12
+    port: 8445
+    data_category: pii
+    owner: identity
+    managed:
+      config_path: fleet/app-tls12/conf.d/site.conf
+      test_cmd: [docker, exec, aegisq-app-tls12, nginx, -t]
+      reload_cmd: [docker, exec, aegisq-app-tls12, nginx, -s, reload]
+      version_cmd: [docker, exec, aegisq-app-tls12, nginx, -V]
+
+  - name: app-ready
+    port: 8446
+    data_category: marketing
+    owner: web
+
+  - name: app-plain
+    port: 8080
+    data_category: internal
+    owner: intranet
+
+  - name: ssh-pq
+    port: 2222
+    protocol: ssh
+    data_category: internal
+    owner: platform
+
+  - name: ssh-legacy
+    port: 2223
+    protocol: ssh
+    data_category: health
+    owner: clinical-platform

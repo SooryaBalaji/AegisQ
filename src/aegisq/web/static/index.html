@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AegisQ Dashboard</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="/static/fredoka.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/nunito.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body class="signed-out">
+<div class="nav-wrap">
+  <header class="nav" aria-label="AegisQ">
+    <a class="wordmark" href="#overview" aria-label="AegisQ home">AEGIS<span>Q</span></a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#overview" data-tab-link="overview">Overview</a>
+      <a href="#run" data-tab-link="run">Run</a>
+      <a href="#approvals" data-tab-link="approvals">Approvals <span id="nav-pending" class="count hidden"></span></a>
+      <a href="#quantum" data-tab-link="quantum">Quantum</a>
+      <a href="#measure" data-tab-link="measure">Measurements</a>
+      <a href="#audit" data-tab-link="audit">Audit log</a>
+    </nav>
+    <div class="nav-right">
+      <span id="who" class="nav-who"></span>
+      <span id="audit-badge" class="badge badge-dark">audit …</span>
+      <button id="logout" class="link-btn" type="button">Sign out</button>
+      <a id="report-link" class="button pill" href="#">Get the report</a>
+    </div>
+  </header>
+</div>
+
+<section id="login" class="login hidden" aria-labelledby="login-title">
+  <span class="eyebrow">Post-quantum readiness</span>
+  <h1 id="login-title" class="display">Sign in to AegisQ.</h1>
+  <p class="lede">Paste your API token: one from <code>AEGISQ_API_TOKENS</code>, or the one printed by <code>aegisq serve</code>.</p>
+  <form id="login-form" class="login-form">
+    <input id="token" type="password" autocomplete="off" placeholder="API token" required minlength="8" aria-label="API token">
+    <button type="submit" class="pill">Sign in</button>
+  </form>
+  <p id="login-error" class="login-error"></p>
+</section>
+
+<main id="app" class="hidden">
+  <section class="hero" id="top" data-tab="overview" aria-labelledby="hero-title">
+    <div class="hero-copy">
+      <span class="eyebrow">Upgrade your key exchange</span>
+      <h1 id="hero-title" class="display">Find it. Rank it. Fix it safely.</h1>
+      <p id="hero-sub" class="lede">Every TLS and SSH service probed with a real post-quantum handshake, ranked by Mosca risk, and migrated by an agent that waits for a named human at every step.</p>
+      <div class="hero-cta">
+        <a class="button pill" href="#run">Scan your servers</a>
+        <a class="button pill-ghost" href="#approvals">Review approvals</a>
+      </div>
+    </div>
+    <div class="tiles" id="tiles" aria-label="Summary"></div>
+  </section>
+
+  <section class="card" id="run" data-tab="run" aria-labelledby="run-title">
+    <h2 id="run-title">Run <span class="muted small">every button runs the real aegisq command; output streams below</span></h2>
+    <a id="run-pending" class="pending-banner hidden" href="#approvals"></a>
+    <p id="run-readonly" class="warn-banner hidden">This dashboard was started with <code>--read-only</code>: results only.</p>
+    <div class="run-grid">
+      <form class="run-card" id="f-scan">
+        <h3>1 · Scan servers</h3>
+        <label for="targets">One per line: <code>host[:port] [tls|ssh] [data category]</code></label>
+        <textarea id="targets" rows="6" spellcheck="false" placeholder="cloudflare.com&#10;www.google.com&#10;github.com:22 ssh&#10;mail.example.com:993 tls payments"></textarea>
+        <div class="btns">
+          <button type="submit" data-run="scan">Scan these servers</button>
+          <button type="button" class="ghost" id="scan-inventory">Scan the inventory</button>
+        </div>
+        <p class="muted small">Each server gets real post-quantum TLS/SSH handshakes. Nothing is changed.</p>
+      </form>
+
+      <form class="run-card" id="f-migrate">
+        <h3>2 · Fix with the agent</h3>
+        <label for="planner">Planner</label>
+        <select id="planner"></select>
+        <fieldset id="svc-box"><legend>Managed services</legend><div id="svc-list" class="checks"></div></fieldset>
+        <div class="btns"><button type="submit" data-run="migrate">Start migration</button></div>
+        <p class="muted small">The agent proposes each change and waits: approve it in <a href="#approvals">Approvals</a>. Failures roll back automatically.</p>
+      </form>
+
+      <form class="run-card" id="f-quantum">
+        <h3>3 · Quantum</h3>
+        <label for="ent-source">Entropy source</label>
+        <select id="ent-source">
+          <option value="simulated">Simulator (~5 s, not quantum)</option>
+          <option value="ibm">IBM quantum hardware (may queue)</option>
+        </select>
+        <div class="btns"><button type="submit" data-run="entropy">Run entropy job</button></div>
+        <label for="shor-backend">Shor's algorithm (N = 15)</label>
+        <select id="shor-backend">
+          <option value="aer">Simulator</option>
+          <option value="ibm">IBM quantum hardware</option>
+        </select>
+        <div class="btns"><button type="button" class="ghost" id="run-shor">Run Shor</button></div>
+      </form>
+
+      <form class="run-card" id="f-bench">
+        <h3>4 · Measure</h3>
+        <label for="bench-url">Handshake benchmark: a PQ-ready HTTPS server</label>
+        <input id="bench-url" type="url" placeholder="https://cloudflare.com/" spellcheck="false">
+        <div class="inline">
+          <label for="bench-n">Handshakes</label><input id="bench-n" type="number" min="10" max="5000" value="200">
+          <label for="bench-method">Method</label>
+          <select id="bench-method"><option value="auto">auto</option><option value="native">native</option><option value="curl">curl</option></select>
+        </div>
+        <div class="btns"><button type="submit" data-run="benchmark">Run benchmark</button></div>
+        <label>Real-world adoption gap</label>
+        <div class="btns"><button type="button" class="ghost" id="run-realworld">Scan top vs long-tail sites</button></div>
+        <p class="muted small">Downloads the Tranco list and probes 1,000 sites (a few minutes).</p>
+      </form>
+    </div>
+
+    <h3 class="jobs-title">Jobs</h3>
+    <div class="scroll"><table id="jobs" class="data"><thead><tr><th>Job</th><th>Started by</th><th>Status</th><th>Time</th><th>Latest output</th><th></th></tr></thead><tbody></tbody></table></div>
+    <p id="no-jobs" class="muted">Nothing has run from the dashboard yet.</p>
+    <div id="job-view" class="job-view hidden">
+      <div class="row-between"><strong id="job-title"></strong><span><button type="button" class="ghost" id="job-cancel">Cancel</button> <button type="button" class="ghost" id="job-close">Close</button></span></div>
+      <pre id="job-log" class="log" tabindex="0" aria-label="Job output" aria-live="polite"></pre>
+    </div>
+  </section>
+
+  <section class="card" id="risk" data-tab="overview" aria-labelledby="mosca-title">
+    <div class="row-between">
+      <h2 id="mosca-title">Which servers are at risk?</h2>
+      <div class="actions">
+        <button id="rescan" class="ghost" type="button">Rescan fleet</button>
+        <a id="cbom-link" class="button ghost" href="#" download="cbom.json">Download CBOM</a>
+      </div>
+    </div>
+    <p class="intro">A server is at risk when its data must stay secret for longer than it will take to build a quantum computer that can break it, minus the time needed to fix the server. Nobody knows that date, so try different guesses with the slider.</p>
+    <div class="z-box">
+      <label for="z">A quantum computer could break today's encryption in</label>
+      <div class="slider-row"><input id="z" type="range" min="0" max="30" step="0.5" value="10"><output id="z-out">10</output><span class="unit">years</span></div>
+      <div id="z-summary" class="z-summary" aria-live="polite"></div>
+      <details class="sources">
+        <summary>Where does this guess come from?</summary>
+        <div class="scroll"><table id="estimates"><thead><tr><th>Estimate</th><th>Target</th><th>Logical qubits</th><th>Physical qubits</th><th>Runtime</th></tr></thead><tbody></tbody></table></div>
+        <p class="muted small" id="estimate-note"></p>
+      </details>
+    </div>
+    <div class="scroll">
+      <table id="ranking" class="data ranking">
+        <thead><tr><th class="num">#</th><th>Server</th><th>Status</th><th>Data</th><th>Risk</th><th aria-label="Details"></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p id="ranking-hint" class="muted small">Click a server to see why it got its risk.</p>
+    <p id="no-scan" class="muted hidden">No scan yet: go to <a href="#run">Run</a>, enter some servers and click <em>Scan these servers</em>.</p>
+  </section>
+
+  <section class="card" id="approvals" data-tab="approvals" aria-labelledby="appr-title">
+    <h2 id="appr-title">Approvals <span class="muted small">every change needs a named human</span></h2>
+    <div id="pending"></div>
+    <details><summary class="muted">Recent decisions</summary><div class="scroll"><table class="data" id="decided"><thead><tr><th>When</th><th>Service</th><th>Status</th><th>By</th><th>Change</th></tr></thead><tbody></tbody></table></div></details>
+  </section>
+
+  <section class="card" id="entropy-section" data-tab="quantum" aria-labelledby="ent-title">
+    <h2 id="ent-title">Quantum entropy</h2>
+    <div id="entropy"><p class="muted">No entropy run yet: use <a href="#run">Run → Quantum</a>.</p></div>
+  </section>
+
+  <section class="grid2" id="measure-section" data-tab="measure">
+    <div class="card" aria-labelledby="rw-title"><h2 id="rw-title">Real-world adoption gap</h2><div id="realworld"><p class="muted">Not measured yet: use <a href="#run">Run → Measure</a>.</p></div></div>
+    <div class="card" aria-labelledby="bm-title"><h2 id="bm-title">Handshake cost</h2><div id="benchmark"><p class="muted">Not measured yet: use <a href="#run">Run → Measure</a>.</p></div></div>
+  </section>
+
+  <section class="card" id="shor-section" data-tab="quantum" aria-labelledby="shor-title">
+    <h2 id="shor-title">Shor's algorithm, honestly</h2>
+    <div id="shor"><p class="muted">Not run yet: use <a href="#run">Run → Quantum</a>.</p></div>
+  </section>
+
+  <section class="card" id="audit-section" data-tab="audit" aria-labelledby="audit-title">
+    <h2 id="audit-title">Audit log</h2>
+    <div class="scroll audit-box"><table id="audit" class="data"><thead><tr><th>#</th><th>Time (UTC)</th><th>Actor</th><th>Event</th><th>Detail</th></tr></thead><tbody></tbody></table></div>
+  </section>
+</main>
+<div id="tooltip" class="tooltip hidden" role="status"></div>
+</body>
+</html>

@@ -1,0 +1,11 @@
+.git
+.aegisq
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+demo/fleet
+htmlcov
+dist
+build

@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AegisQ Migration Report</title>
+<style>
+:root { --bg:#fbfaf7; --fg:#1d1d1b; --muted:#6b6a65; --line:#e3e1da; --ok:#1f7a4d; --bad:#b3261e; --warn:#a15c00; --card:#fff; }
+@media (prefers-color-scheme: dark) { :root { --bg:#161614; --fg:#ecebe6; --muted:#a3a29b; --line:#33322e; --ok:#5fc48f; --bad:#ff8a80; --warn:#f0b35a; --card:#1e1e1b; } }
+body { background:var(--bg); color:var(--fg); font:15px/1.55 system-ui, -apple-system, Segoe UI, sans-serif; margin:0; padding:24px 16px 64px; }
+main { max-width:1000px; margin:0 auto; }
+h1 { font-size:28px; margin:0 0 4px; } h2 { margin-top:36px; font-size:20px; border-bottom:1px solid var(--line); padding-bottom:6px; }
+.muted { color:var(--muted); } .ok { color:var(--ok); font-weight:600; } .bad { color:var(--bad); font-weight:600; }
+.tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:16px 0; }
+.tile { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; }
+.tile b { display:block; font-size:24px; }
+.scroll { overflow-x:auto; } table { border-collapse:collapse; width:100%; font-size:14px; }
+th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { color:var(--muted); font-weight:600; }
+.sev-critical { color:var(--bad); font-weight:700; } .sev-high { color:var(--bad); } .sev-medium { color:var(--warn); } .sev-none { color:var(--ok); }
+code { font-size:13px; } ul { padding-left:20px; }
+</style>
+</head>
+<body><main>
+<h1>AegisQ post-quantum migration report</h1>
+<div class="muted">Generated {{ generated_at }} · AegisQ {{ version }} · Audit log
+{% if audit.ok %}<span class="ok">intact</span> ({{ audit.entries }} entries, {{ "HMAC-keyed" if audit.keyed else "SHA-256" }} chain){% else %}<span class="bad">TAMPERED OR CORRUPT: {{ audit.error }}</span>{% endif %}</div>
+
+{% if scan %}
+<div class="tiles">
+  <div class="tile"><b>{{ scan.summary.total }}</b>services</div>
+  <div class="tile"><b class="ok">{{ scan.ready_pct }}%</b>post-quantum ready</div>
+  <div class="tile"><b class="bad">{{ scan.at_risk }}</b>at risk at Z = {{ z }}</div>
+  <div class="tile"><b>{{ scan.summary.classical + scan.summary.tls12_only + scan.summary.legacy_tls }}</b>classical / old TLS</div>
+  <div class="tile"><b>{{ scan.summary.plaintext }}</b>plaintext HTTP</div>
+</div>
+
+<h2>Risk ranking (margin = X + Y − Z, Z = {{ z }})</h2>
+<div class="scroll"><table>
+<tr><th>#</th><th>Service</th><th>Status</th><th>Data</th><th>X</th><th>Y</th><th>Margin</th><th>Severity</th><th>Why Y</th></tr>
+{% for r in ranking %}
+<tr><td>{{ r.rank }}</td><td>{{ r.service }}</td><td>{{ r.status }}</td><td>{{ r.data_category }}</td><td>{{ r.x_retention }}</td><td>{{ r.y_migration }}</td>
+<td>{{ "%+.1f"|format(r.margin) }}</td><td class="sev-{{ r.severity }}">{{ r.severity }}</td><td class="muted">{{ r.y_reason }}</td></tr>
+{% endfor %}
+</table></div>
+{% endif %}
+
+<h2>Migration actions</h2>
+{% for svc, events in timeline.items() %}
+<h3>{{ svc }}{% if outcomes.get(svc) %} <span class="muted">— {{ outcomes[svc] }}</span>{% endif %}</h3>
+<ul>{% for e in events %}<li><code>{{ e.ts }}</code> <span class="muted">({{ e.actor }})</span> {{ e.text }}</li>{% endfor %}</ul>
+{% else %}
+<p class="muted">No migration actions recorded yet.</p>
+{% endfor %}
+
+{% if findings %}
+<h2>Findings</h2>
+{% for svc, items in findings.items() %}<h3>{{ svc }}</h3><ul>{% for f in items %}<li>{{ f }}</li>{% endfor %}</ul>{% endfor %}
+{% endif %}
+
+{% if cbom %}
+<h2>Cryptographic Bill of Materials</h2>
+<p><code>{{ cbom.file }}</code>: CycloneDX {{ cbom.spec }}, {{ cbom.components }} cryptographic assets, schema validation
+{% if cbom.valid %}<span class="ok">passed</span>{% else %}<span class="bad">FAILED</span>{% endif %}.</p>
+{% endif %}
+
+{% if realworld %}
+<h2>Real-world adoption gap</h2>
+<div class="scroll"><table><tr><th>Group</th><th>Sites</th><th>Reachable</th><th>PQ ready</th><th>Share</th></tr>
+{% for g in realworld.groups %}<tr><td>{{ g.label }}</td><td>{{ g.sites }}</td><td>{{ g.reachable }}</td><td>{{ g.pq_ready }}</td><td>{{ g.pq_pct }}%</td></tr>{% endfor %}
+</table></div>
+<p class="muted">Tranco list {{ realworld.list_id }}; scan took {{ realworld.duration_s }} s.</p>
+{% endif %}
+
+{% if benchmark %}
+<h2>Handshake cost (measured)</h2>
+<div class="scroll"><table><tr><th>Setting</th><th>n</th><th>p50 ms</th><th>p99 ms</th><th>Failures</th></tr>
+{% for b in benchmark.results %}<tr><td>{{ b.label }}</td><td>{{ b.n }}</td><td>{{ b.p50_ms }}</td><td>{{ b.p99_ms }}</td><td>{{ b.failures }}</td></tr>{% endfor %}
+</table></div><p class="muted">{{ benchmark.caveat }}</p>
+{% endif %}
+
+{% if entropy %}
+<h2>Quantum entropy</h2>
+<p>Source: {{ entropy.source }}{% if entropy.job_id %}, IBM job <code>{{ entropy.job_id }}</code> on {{ entropy.backend }}{% endif %}
+{% if entropy.simulated %}<span class="bad">SIMULATED: not quantum randomness</span>{% endif %}.
+Raw bits {{ entropy.raw_bits }}; min-entropy h = {{ "%.4f"|format(entropy.h_min) }}; extracted {{ entropy.extracted_bits }} bits at ε = 2<sup>-{{ entropy.eps_bits }}</sup>.</p>
+{% endif %}
+
+<h2>Where the Z assumption comes from</h2>
+<div class="scroll"><table><tr><th>Estimate</th><th>Target</th><th>Logical qubits</th><th>Physical qubits</th><th>Runtime</th></tr>
+{% for e in estimates %}<tr><td>{{ e.estimate }}</td><td>{{ e.target }}</td><td>{{ e.logical_qubits }}</td><td>{{ e.physical_qubits }}</td><td>{{ e.runtime }}</td></tr>{% endfor %}
+</table></div>
+<p class="muted">{{ estimate_note }}</p>
+</main></body></html>

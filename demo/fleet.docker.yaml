@@ -1,0 +1,68 @@
+# AegisQ demo inventory for running AegisQ INSIDE Docker (docker compose run / the aegisq-dashboard
+# container). Servers are addressed by container name on the compose network, so this works on
+# Docker Desktop for Windows and Mac. Use fleet.yaml when AegisQ runs directly on the host.
+# Paths are relative to this file.
+# `managed` blocks are the ONLY services the migration agent may change; commands are argv lists.
+defaults:
+  sni: localhost
+  protocol: tls
+
+services:
+  - name: app-modern
+    host: app-modern
+    port: 443
+    data_category: health
+    owner: clinical-platform
+    managed:
+      config_path: fleet/app-modern/conf.d/site.conf
+      test_cmd: [docker, exec, aegisq-app-modern, nginx, -t]
+      reload_cmd: [docker, exec, aegisq-app-modern, nginx, -s, reload]
+      version_cmd: [docker, exec, aegisq-app-modern, nginx, -V]
+
+  - name: app-legacy
+    host: app-legacy
+    port: 443
+    data_category: payments
+    owner: billing
+    managed:
+      config_path: fleet/app-legacy/conf.d/site.conf
+      test_cmd: [docker, exec, aegisq-app-legacy, nginx, -t]
+      reload_cmd: [docker, exec, aegisq-app-legacy, nginx, -s, reload]
+      version_cmd: [docker, exec, aegisq-app-legacy, nginx, -V]
+
+  - name: app-tls12
+    host: app-tls12
+    port: 443
+    data_category: pii
+    owner: identity
+    managed:
+      config_path: fleet/app-tls12/conf.d/site.conf
+      test_cmd: [docker, exec, aegisq-app-tls12, nginx, -t]
+      reload_cmd: [docker, exec, aegisq-app-tls12, nginx, -s, reload]
+      version_cmd: [docker, exec, aegisq-app-tls12, nginx, -V]
+
+  - name: app-ready
+    host: app-ready
+    port: 443
+    data_category: marketing
+    owner: web
+
+  - name: app-plain
+    host: app-plain
+    port: 80
+    data_category: internal
+    owner: intranet
+
+  - name: ssh-pq
+    host: ssh-pq
+    port: 22
+    protocol: ssh
+    data_category: internal
+    owner: platform
+
+  - name: ssh-legacy
+    host: ssh-legacy
+    port: 22
+    protocol: ssh
+    data_category: health
+    owner: clinical-platform
