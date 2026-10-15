@@ -47,8 +47,6 @@ def collect(ws: Workspace, cfg: AegisQConfig, z: float | None = None) -> dict[st
         "outcomes": {},
         "estimates": RESOURCE_ESTIMATES,
         "estimate_note": RESOURCE_ESTIMATE_NOTE,
-        "realworld": ws.load_json("realworld/latest.json"),
-        "entropy": ws.load_json("entropy/latest-analysis.json"),
         "benchmark": ws.load_json("benchmarks/latest.json"),
         "cbom": ws.load_json("cbom-summary.json"),
     }

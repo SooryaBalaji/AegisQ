@@ -2,15 +2,12 @@ import asyncio
 import sys
 import threading
 import time
-import zipfile
 from pathlib import Path
 
 import pytest
 
-from aegisq import tranco
 from aegisq.agent.diagnose import diagnose, openssl_version_from
 from aegisq.benchmark import _stats, bench_native
-from aegisq.models import ServiceScan, ServiceTarget, Status
 from aegisq.proc import run_async, run_sync
 from fakes import tls_server
 
@@ -52,39 +49,6 @@ def test_benchmark_native() -> None:
     assert r["failures"] == 0 and r["p50_ms"] is not None and r["server_key_share_bytes"] == 1120
     assert c["client_key_share_bytes"] == 32
     assert _stats([])["p50_ms"] is None
-
-
-def test_tranco_load_and_sample(tmp_path: Path) -> None:
-    rows = "\n".join(f"{i},site{i}.example" for i in range(1, 2001))
-    csv_path = tmp_path / "list.csv"
-    csv_path.write_text("rank,domain\n" + rows)
-    zpath = tmp_path / "list.zip"
-    with zipfile.ZipFile(zpath, "w") as z:
-        z.writestr("top-1m.csv", rows)
-    assert tranco.load_list(csv_path) == tranco.load_list(zpath)
-    head, tail = tranco.sample(tranco.load_list(csv_path), top=10, tail=20, lo=1000, hi=2000, seed=1)
-    assert [r for r, _ in head] == list(range(1, 11))
-    assert all(1000 <= r <= 2000 for r, _ in tail) and len(tail) == 20
-    assert tail == tranco.sample(tranco.load_list(csv_path), 10, 20, 1000, 2000, seed=1)[1]  # reproducible
-    (tmp_path / "empty.csv").write_text("nothing here")
-    with pytest.raises(ValueError):
-        tranco.load_list(tmp_path / "empty.csv")
-
-
-def test_tranco_group_stats() -> None:
-    t = ServiceTarget(name="x", host="a.example", port=443)
-    res = [ServiceScan(service=t, status=s) for s in (Status.PQ_READY, Status.CLASSICAL, Status.UNREACHABLE)]
-    g = tranco._group_stats("Top", res)
-    assert (g["sites"], g["reachable"], g["pq_ready"], g["pq_pct"], g["failed_to_connect"]) == (3, 2, 1, 50.0, 1)
-
-
-def test_realworld_refuses_private_space(tmp_path: Path) -> None:
-    p = tmp_path / "l.csv"
-    p.write_text("1,localhost\n2,bad..name\n")
-    summary, results = tranco.run_realworld(p, top=2, tail=0, timeout=1)
-    assert [r.status for r in results] == [Status.ERROR]  # localhost -> 127.0.0.1 is denied; bad name skipped
-    assert "scope" in results[0].errors[0]
-    assert summary["groups"][0]["reachable"] == 0
 
 
 def test_openssl_backend_output_parsing(monkeypatch) -> None:

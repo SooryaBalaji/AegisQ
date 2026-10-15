@@ -384,10 +384,22 @@ def _terminal_waiter(c: Ctx, approver: str) -> Any:
     help="Where the human approves: the dashboard / `aegisq approve`, or a prompt in this terminal.",
 )
 @click.option("--approver", default=None, help="Name recorded for terminal approvals (default: OS user).")
+@click.option(
+    "--initiator",
+    default=None,
+    help="Who started this run (default: OS user). With separation of duties on, they cannot approve its changes.",
+)
 @click.option("--rescan/--no-rescan", default=True, show_default=True, help="Scan the inventory first.")
 @pass_ctx
 def migrate(
-    c: Ctx, inventory: str, planner: str, services: tuple[str, ...], approve_in: str, approver: str | None, rescan: bool
+    c: Ctx,
+    inventory: str,
+    planner: str,
+    services: tuple[str, ...],
+    approve_in: str,
+    approver: str | None,
+    initiator: str | None,
+    rescan: bool,
 ) -> None:
     """Run the migration agent: propose, get approval, apply, verify, roll back on failure."""
     from aegisq.agent.runner import choose_planner
@@ -425,8 +437,15 @@ def migrate(
             results.append(r.model_copy(update={"service": targets[r.service.name]}))
     report = report.model_copy(update={"results": results})
 
+    initiator = (initiator or getpass.getuser()).strip()
     waiter = None
     if approve_in == "terminal":
+        if c.cfg.agent.separation_of_duties:
+            _fail(
+                "separation of duties is on, so the person running the agent cannot approve its changes: "
+                "approve on the dashboard as someone else, or set agent.separation_of_duties: false for a "
+                "one-person setup"
+            )
         if not sys.stdin.isatty():
             _fail("--approve-in terminal needs an interactive terminal")
         waiter = _terminal_waiter(c, approver or getpass.getuser())
@@ -435,7 +454,7 @@ def migrate(
             "Approve or reject each change on the dashboard (`aegisq serve`) or with "
             "`aegisq approvals list` / `aegisq approve ID --by NAME`."
         )
-    tb = Toolbox(c.ws, c.cfg, report, approval_waiter=waiter)
+    tb = Toolbox(c.ws, c.cfg, report, approval_waiter=waiter, initiator=initiator)
     try:
         agent = choose_planner(planner, c.cfg.agent)
     except RuntimeError as e:
@@ -540,6 +559,80 @@ def reject(c: Ctx, approval_id: str, by: str, reason: str) -> None:
     _decide(c, approval_id, False, by, reason)
 
 
+# ---------------------------------------------------------------- users ---
+
+
+@main.group()
+def users() -> None:
+    """Manage dashboard users and roles (viewer, operator, approver, admin)."""
+
+
+def _user_store(c: Ctx) -> Any:
+    from aegisq.users import UserStore
+
+    return UserStore(c.ws.home / "state.db")
+
+
+@users.command("add")
+@click.argument("name")
+@click.option("--role", type=click.Choice(["viewer", "operator", "approver", "admin"]), required=True)
+@pass_ctx
+def users_add(c: Ctx, name: str, role: str) -> None:
+    """Create a user and print their login token (shown once)."""
+    try:
+        token = _user_store(c).add(name, role, created_by=f"cli:{getpass.getuser()}")
+    except ValueError as e:
+        _fail(str(e))
+    c.ws.audit.append("user.created", {"name": name, "role": role, "via": "cli"}, actor=getpass.getuser())
+    click.echo(f"{name} ({role}) created. Token, shown only once:\n{token}")
+
+
+@users.command("list")
+@pass_ctx
+def users_list(c: Ctx) -> None:
+    for u in _user_store(c).list():
+        click.echo(f"{u.name:<24} {u.role}")
+
+
+@users.command("role")
+@click.argument("name")
+@click.argument("role", type=click.Choice(["viewer", "operator", "approver", "admin"]))
+@pass_ctx
+def users_role(c: Ctx, name: str, role: str) -> None:
+    """Change a user's role."""
+    try:
+        _user_store(c).set_role(name, role)
+    except (LookupError, ValueError) as e:
+        _fail(str(e))
+    c.ws.audit.append("user.role_changed", {"name": name, "role": role, "via": "cli"}, actor=getpass.getuser())
+    click.echo(f"{name} is now {role}")
+
+
+@users.command("token")
+@click.argument("name")
+@pass_ctx
+def users_token(c: Ctx, name: str) -> None:
+    """Issue a new token for a user (the old one stops working)."""
+    try:
+        token = _user_store(c).rotate(name)
+    except LookupError as e:
+        _fail(str(e))
+    c.ws.audit.append("user.token_rotated", {"name": name, "via": "cli"}, actor=getpass.getuser())
+    click.echo(f"New token for {name}, shown only once:\n{token}")
+
+
+@users.command("remove")
+@click.argument("name")
+@pass_ctx
+def users_remove(c: Ctx, name: str) -> None:
+    try:
+        _user_store(c).remove(name)
+    except LookupError as e:
+        _fail(str(e))
+    c.ws.audit.append("user.removed", {"name": name, "via": "cli"}, actor=getpass.getuser())
+    click.echo(f"{name} removed")
+
+
 # ---------------------------------------------------------------- audit ---
 
 
@@ -598,7 +691,7 @@ def report(c: Ctx, z: float | None) -> None:
 @click.option("--read-only", is_flag=True, help="Show results only: no scans, migrations or other jobs from the web.")
 @pass_ctx
 def serve(c: Ctx, host: str | None, port: int | None, inventory: str | None, read_only: bool) -> None:
-    """Run the dashboard: results, approvals, and buttons that run scans, migrations and quantum jobs."""
+    """Run the dashboard: results, approvals, and buttons that run scans and migrations."""
     import uvicorn
 
     from aegisq.web.app import create_app
@@ -609,208 +702,13 @@ def serve(c: Ctx, host: str | None, port: int | None, inventory: str | None, rea
             inventory=os.path.abspath(inventory) if inventory else None,
             config_path=c.config_path,
             jobs_enabled=not read_only,
+            background=True,
         )
     except ValueError as e:
         _fail(str(e))
     h, p = host or c.cfg.server.host, port or c.cfg.server.port
     click.echo(f"dashboard: http://{h}:{p}/")
     uvicorn.run(app, host=h, port=p, log_level="warning", server_header=False)
-
-
-# ------------------------------------------------------------ realworld ---
-
-
-@main.command()
-@click.option("--list", "list_file", type=click.Path(exists=True, dir_okay=False), help="Tranco CSV or ZIP.")
-@click.option("--download", is_flag=True, help="Download the current Tranco list first.")
-@click.option("--list-id", default=None, help="Tranco list ID, recorded in the results.")
-@click.option("--top", default=500, show_default=True)
-@click.option("--tail", default=500, show_default=True)
-@click.option("--seed", default=2026, show_default=True)
-@click.option("--concurrency", default=50, show_default=True)
-@click.option("--timeout", default=5.0, show_default=True)
-@pass_ctx
-def realworld(
-    c: Ctx,
-    list_file: str | None,
-    download: bool,
-    list_id: str | None,
-    top: int,
-    tail: int,
-    seed: int,
-    concurrency: int,
-    timeout: float,
-) -> None:
-    """Measure the PQ adoption gap: top Tranco sites vs a random sample from ranks 100k-1M."""
-    from aegisq import tranco
-
-    if download:
-        path = tranco.download(c.ws.home / "realworld" / "tranco-top-1m.csv.zip")
-    elif list_file:
-        path = Path(list_file)
-    else:
-        _fail("give --list FILE or --download")
-    summary, results = tranco.run_realworld(path, top, tail, seed, timeout, concurrency, list_id or "unknown")
-    c.ws.save_json("realworld/latest.json", summary)
-    c.ws.save_json(
-        f"realworld/{summary['scan_id']}-sites.json",
-        [
-            {
-                "site": r.service.host,
-                "group": r.service.tags[0],
-                "status": r.status.value,
-                "group_negotiated": r.tls.pq_group if r.tls else None,
-                "error": r.errors[0] if r.errors else None,
-            }
-            for r in results
-        ],
-    )
-    c.ws.audit.append("realworld.completed", summary)
-    for g in summary["groups"]:
-        click.echo(
-            f"{g['label']:<40} {g['pq_ready']}/{g['reachable']} reachable sites PQ ready "
-            f"({g['pq_pct']}%), {g['failed_to_connect']} failed to connect"
-        )
-    click.echo(f"total scan time {summary['duration_s']} s")
-
-
-# -------------------------------------------------------------- entropy ---
-
-
-@main.group()
-def entropy() -> None:
-    """Quantum entropy: run the QRNG job and analyse saved results."""
-
-
-@entropy.command("run")
-@click.option(
-    "--source",
-    type=click.Choice(["ibm", "simulated"]),
-    required=True,
-    help="ibm = real hardware; simulated = Aer with a real calibration snapshot (NOT quantum randomness).",
-)
-@click.option("--qubits", default=100, show_default=True)
-@click.option("--shots", default=10_000, show_default=True)
-@click.option("--backend", default=None, help="IBM backend name (default: least busy) or fake backend for simulated.")
-@click.option(
-    "--noise",
-    type=click.Choice(["readout", "full"]),
-    default="readout",
-    show_default=True,
-    help="simulated only: readout = measured readout errors, seconds; full = full device noise, ~1 min.",
-)
-@pass_ctx
-def entropy_run(c: Ctx, source: str, qubits: int, shots: int, backend: str | None, noise: str) -> None:
-    from aegisq.entropy import qrng
-
-    try:
-        if source == "ibm":
-            run = qrng.run_ibm(qubits, shots, backend_name=backend)
-        else:
-            run = qrng.run_simulated(qubits, shots, fake_backend=backend or "FakeFez", noise=noise)
-    except (qrng.QuantumUnavailable, ValueError) as e:
-        _fail(str(e))
-    name = f"run-{run.job_id or run.created.replace(':', '')}.json"
-    path = c.ws.home / "entropy" / name
-    qrng.save_run(run, path)
-    qrng.save_run(run, c.ws.home / "entropy" / "latest-run.json")
-    c.ws.audit.append(
-        "entropy.job_completed",
-        {
-            "source": run.source,
-            "backend": run.backend,
-            "job_id": run.job_id,
-            "simulated": run.simulated,
-            "shots": shots,
-            "qubits": qubits,
-            "file": name,
-        },
-    )
-    click.echo(f"saved {path}" + (f" (IBM job {run.job_id})" if run.job_id else ""))
-    _entropy_analyze(c, path, None)
-
-
-def _entropy_analyze(c: Ctx, path: Path, key_out: str | None) -> None:
-    from aegisq.entropy import qrng
-    from aegisq.entropy.analysis import EntropyError, analyze
-
-    try:
-        run = qrng.load_run(path)
-        summary, _ext, key = analyze(run)
-    except EntropyError as e:
-        _fail(str(e))
-    c.ws.save_json("entropy/latest-analysis.json", summary)
-    c.ws.audit.append(
-        "entropy.analyzed",
-        {
-            k: summary[k]
-            for k in (
-                "source",
-                "backend",
-                "job_id",
-                "simulated",
-                "raw_bits",
-                "h_min",
-                "extracted_bits",
-                "eps_bits",
-                "key_fingerprint_sha256",
-            )
-        },
-    )
-    if summary.get("warning"):
-        click.secho(summary["warning"], fg="yellow")
-    click.echo(f"backend {summary['backend']}  job {summary['job_id'] or '-'}")
-    click.echo(
-        f"raw bits {summary['raw_bits']:,}; min-entropy h = {summary['h_min']:.4f} (worst qubit "
-        f"{summary['worst_qubit']}); extracted {summary['extracted_bits']:,} bits at eps = 2^-{summary['eps_bits']}"
-    )
-    for side in ("extracted", "os_urandom"):
-        tests = ", ".join(
-            f"{t['test']} p={t['p_value']:.3f} {'pass' if t['pass'] else 'FAIL'}" for t in summary["tests"][side]
-        )
-        click.echo(f"  {side:<10} {tests}")
-    if key_out:
-        fd = os.open(key_out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(key)
-        click.echo(f"wrote 32-byte key to {key_out} (mode 0600; fingerprint {summary['key_fingerprint_sha256']})")
-
-
-@entropy.command("analyze")
-@click.argument("file", type=click.Path(exists=True, dir_okay=False), required=False)
-@click.option("--key-out", type=click.Path(dir_okay=False), help="Write the HKDF-mixed 32-byte key here (0600).")
-@pass_ctx
-def entropy_analyze(c: Ctx, file: str | None, key_out: str | None) -> None:
-    path = Path(file) if file else c.ws.home / "entropy" / "latest-run.json"
-    if not path.exists():
-        _fail("no saved run: use `aegisq entropy run` first or pass a file")
-    _entropy_analyze(c, path, key_out)
-
-
-@main.command()
-@click.option("--backend", default="aer", show_default=True, help="aer, ibm (least busy) or an IBM backend name.")
-@click.option("--shots", default=2048, show_default=True)
-@pass_ctx
-def shor(c: Ctx, backend: str, shots: int) -> None:
-    """Shor's order finding for N = 15, a = 7 (an honest toy demonstration)."""
-    try:
-        from aegisq.entropy import shor as shor_mod
-        from aegisq.entropy.qrng import QuantumUnavailable
-
-        res = shor_mod.run(backend=backend, shots=shots)
-    except ImportError:
-        _fail("install the quantum extra: pip install 'aegisq[quantum]'")
-    except QuantumUnavailable as e:
-        _fail(str(e))
-    c.ws.save_json("entropy/shor.json", res)
-    c.ws.audit.append(
-        "shor.ran",
-        {"backend": res["backend"], "job_id": res.get("job_id"), "period": res["period"], "factors": res["factors"]},
-    )
-    for o in res["outcomes"][:8]:
-        click.echo(f"  {o['bits']}  {o['share']:>6.1%}  phase {o['fraction']:<5} r={o['r']}")
-    click.echo(f"period r = {res['period']}; factors of 15: {res['factors']}")
-    click.secho(res["disclaimer"], fg="yellow")
 
 
 # ------------------------------------------------------------ benchmark ---
@@ -894,16 +792,11 @@ def doctor(c: Ctx) -> None:
         "curl benchmark",
         "curl with OpenSSL 3.5+" if curl_supports_mlkem() else "use --method native or the container",
     )
-    for mod, label in (
-        ("anthropic", "claude planner"),
-        ("qiskit", "quantum module"),
-        ("qiskit_ibm_runtime", "IBM runtime"),
-    ):
-        try:
-            __import__(mod)
-            line(True, label, f"{mod} installed")
-        except ImportError:
-            line(None, label, f"pip install 'aegisq[{'agent' if mod == 'anthropic' else 'quantum'}]'")
+    try:
+        __import__("anthropic")
+        line(True, "claude planner", "anthropic installed")
+    except ImportError:
+        line(None, "claude planner", "pip install 'aegisq[agent]'")
     line(
         bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")) or None,
         "Anthropic credentials",

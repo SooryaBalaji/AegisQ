@@ -1,6 +1,6 @@
 """Configuration: a YAML file (``--config`` / ``AEGISQ_CONFIG``) plus environment overrides.
 
-Secrets (API tokens, the audit HMAC key, model and IBM keys) are read from the
+Secrets (API tokens, the audit HMAC key and model keys) are read from the
 environment only, never from the config file, so the file can be committed. For convenience
 the CLI also reads a ``.env`` file (see ``load_env_file``) into the environment.
 """
@@ -98,6 +98,8 @@ class AgentConfig(BaseModel):
     approval_timeout_s: float = Field(default=1800, gt=0)
     approval_ttl_s: float = Field(default=3600, gt=0)
     require_classical_fallback: bool = True
+    # The person who starts a migration may not approve its changes; turn off only for one-person setups.
+    separation_of_duties: bool = True
     min_tls_version: str = Field(default="TLSv1.2", pattern=r"^TLSv1\.[23]$")
     allowed_groups: list[str] = Field(
         default_factory=lambda: [
@@ -107,9 +109,29 @@ class AgentConfig(BaseModel):
             "X25519",
             "secp256r1",
             "prime256v1",
+            "P-256",
             "secp384r1",
+            "P-384",
             "secp521r1",
+            "P-521",
             "X448",
+        ]
+    )
+    # OpenSSH KexAlgorithms the agent may write: PQ hybrids plus OpenSSH's classical defaults.
+    allowed_ssh_kex: list[str] = Field(
+        default_factory=lambda: [
+            "mlkem768x25519-sha256",
+            "sntrup761x25519-sha512",
+            "sntrup761x25519-sha512@openssh.com",
+            "curve25519-sha256",
+            "curve25519-sha256@libssh.org",
+            "ecdh-sha2-nistp256",
+            "ecdh-sha2-nistp384",
+            "ecdh-sha2-nistp521",
+            "diffie-hellman-group-exchange-sha256",
+            "diffie-hellman-group16-sha512",
+            "diffie-hellman-group18-sha512",
+            "diffie-hellman-group14-sha256",
         ]
     )
     verify_attempts: int = Field(default=5, ge=1, le=30)
@@ -181,15 +203,27 @@ def load_env_file(path: str | Path | None = None) -> tuple[Path, int] | None:
     return None
 
 
+ROLE_NAMES = ("viewer", "operator", "approver", "admin")
+
+
 def api_tokens() -> dict[str, str]:
-    """Parse AEGISQ_API_TOKENS='alice:tok1,bob:tok2' into {token: identity}."""
+    """Parse AEGISQ_API_TOKENS='alice:tok1,bob:tok2:approver' into {token: identity}.
+
+    The identity is the name, or ``name:role`` when a role is given (no role means admin)."""
     raw = os.environ.get("AEGISQ_API_TOKENS", "").strip()
     out: dict[str, str] = {}
     for item in filter(None, (s.strip() for s in raw.split(","))):
-        if ":" not in item:
-            raise ValueError("AEGISQ_API_TOKENS entries must look like name:token")
-        name, tok = item.split(":", 1)
+        parts = item.split(":")
+        if len(parts) not in (2, 3):
+            raise ValueError("AEGISQ_API_TOKENS entries must look like name:token or name:token:role")
+        name, tok = parts[0].strip(), parts[1]
         if len(tok) < 16:
             raise ValueError(f"API token for {name!r} is shorter than 16 characters")
-        out[tok] = name.strip()
+        if len(parts) == 3:
+            role = parts[2].strip().lower()
+            if role not in ROLE_NAMES:
+                raise ValueError(f"role for {name!r} must be one of {', '.join(ROLE_NAMES)}")
+            out[tok] = f"{name}:{role}"
+        else:
+            out[tok] = name
     return out

@@ -57,3 +57,8 @@ services:
     protocol: ssh
     data_category: health
     owner: clinical-platform
+    managed:
+      config_path: fleet/ssh-legacy/sshd/sshd_config
+      test_cmd: [docker, exec, aegisq-ssh-legacy, /usr/sbin/sshd, -t, -f, /etc/ssh/aegisq/sshd_config]
+      reload_cmd: [docker, kill, --signal=HUP, aegisq-ssh-legacy]
+      version_cmd: [docker, exec, aegisq-ssh-legacy, /usr/sbin/sshd, -V]

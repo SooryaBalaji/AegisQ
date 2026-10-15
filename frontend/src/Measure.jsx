@@ -1,27 +1,9 @@
+import { useState } from "react";
+import { startJob } from "./api.js";
 import { fmt } from "./util.jsx";
 
-function RealWorld({ rw }) {
-  if (!rw) return <p className="muted">Not measured yet: use <a href="#run">Run → Measure</a>.</p>;
-  return (
-    <>
-      <div className="scroll">
-        <table className="data">
-          <thead><tr><th>Group</th><th className="num">Reachable</th><th className="num">PQ ready</th><th className="num">Share</th><th className="num">Failed</th></tr></thead>
-          <tbody>{rw.groups.map((g) => (
-            <tr key={g.label}>
-              <td>{g.label}</td><td className="num">{g.reachable}</td><td className="num">{g.pq_ready}</td>
-              <td className="num">{g.pq_pct}%</td><td className="num">{g.failed_to_connect}</td>
-            </tr>
-          ))}</tbody>
-        </table>
-      </div>
-      <p className="muted small">{`${rw.method}. Tranco list ${rw.list_id}, seed ${rw.seed}, ${rw.duration_s} s.`}</p>
-    </>
-  );
-}
-
-function Benchmark({ bm }) {
-  if (!bm) return <p className="muted">Not measured yet: use <a href="#run">Run → Measure</a>.</p>;
+function Results({ bm }) {
+  if (!bm) return <p className="muted">Not measured yet. Run a benchmark against a server that supports post-quantum TLS.</p>;
   const sz = bm.sizes;
   return (
     <>
@@ -43,11 +25,46 @@ function Benchmark({ bm }) {
   );
 }
 
-export default function Measure({ realworld, benchmark }) {
+function Form({ client, jobs, loadJobs, signOut, canRun }) {
+  const [url, setUrl] = useState("");
+  const [n, setN] = useState(200);
+  const [method, setMethod] = useState("auto");
+  const [busy, setBusy] = useState(false);
+  const running = jobs.some((j) => j.kind === "benchmark" && j.status === "running");
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!url.trim()) return;
+    setBusy(true);
+    await startJob(client, { kind: "benchmark", url: url.trim(), n: Number(n) || 200, method }, loadJobs, signOut);
+    setBusy(false);
+  };
   return (
-    <section className="grid2" id="measure">
-      <div className="card" aria-labelledby="rw-title"><h2 id="rw-title">Real-world adoption gap</h2><RealWorld rw={realworld} /></div>
-      <div className="card" aria-labelledby="bm-title"><h2 id="bm-title">Handshake cost</h2><Benchmark bm={benchmark} /></div>
+    <form className="run-card" onSubmit={submit}>
+      <h3>Measure a server</h3>
+      <label htmlFor="bench-url">HTTPS server that supports post-quantum TLS</label>
+      <input id="bench-url" type="url" required placeholder="https://cloudflare.com/" spellCheck={false} value={url} onChange={(e) => setUrl(e.target.value)} />
+      <div className="inline">
+        <label htmlFor="bench-n">Handshakes</label>
+        <input id="bench-n" type="number" min={10} max={5000} value={n} onChange={(e) => setN(e.target.value)} />
+        <label htmlFor="bench-method">Method</label>
+        <select id="bench-method" value={method} onChange={(e) => setMethod(e.target.value)}>
+          <option value="auto">auto</option><option value="native">native</option><option value="curl">curl</option>
+        </select>
+      </div>
+      <div className="btns"><button type="submit" disabled={busy || running || !canRun} title={canRun ? "" : "Your role cannot start jobs"}>{running ? "Running…" : "Run benchmark"}</button></div>
+      <p className="muted small">Compares hybrid X25519MLKEM768 with classical X25519 handshakes against the same server.</p>
+    </form>
+  );
+}
+
+export default function Measure({ benchmark, client, jobs, loadJobs, signOut, canRun }) {
+  return (
+    <section className="card" id="measure" aria-labelledby="bm-title">
+      <h2 id="bm-title">Handshake cost <span className="muted">post-quantum vs classical, measured</span></h2>
+      <div className="grid2">
+        <Form client={client} jobs={jobs} loadJobs={loadJobs} signOut={signOut} canRun={canRun} />
+        <div><Results bm={benchmark} /></div>
+      </div>
     </section>
   );
 }

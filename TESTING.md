@@ -26,11 +26,10 @@ function aq { docker compose -f demo/docker-compose.yml run --rm --no-deps aegis
 | Scan | `aq scan fleet.docker.yaml` | 2 PQ ready, 3 classical, 1 TLS1.2, 1 plaintext |
 | CBOM | `aq cbom --out /var/lib/aegisq/workspace/cbom.json` | "30 cryptographic assets (valid CycloneDX 1.6)" |
 | Risk | `aq risk --sweep 0,10,20` | ssh-legacy and app-modern critical |
-| Agent | `aq migrate fleet.docker.yaml --planner rules`, then approve each change at http://localhost:8000 | app-modern and app-tls12 fixed; app-legacy fails, is restored, and is diagnosed as OpenSSL 3.0 |
+| Agent | `aq migrate fleet.docker.yaml --planner rules`, then approve each change at http://localhost:8000 | app-modern, app-tls12 and ssh-legacy fixed; app-legacy fails, is restored, and is diagnosed as OpenSSL 3.0 |
 | Approve from a 2nd terminal instead | `aq approvals list --status pending`, then `aq approve <ID> --by alice` | "approved by alice" |
 | Audit and report | `aq audit verify` then `aq report` | "audit log intact" |
-| Quantum | `aq entropy run --source simulated` then `aq shor` | h ≈ 0.92; period r = 4, factors 3 × 5 |
-| Unit tests | `docker compose -f demo/docker-compose.yml --profile test run --rm --no-deps tests -q` | 207 passed |
+| Unit tests | `docker compose -f demo/docker-compose.yml --profile test run --rm --no-deps tests -q` | about 220 passed |
 | Integration tests | add `-m integration` to the line above | 2 passed |
 
 Use `fleet.docker.yaml`, not `fleet.yaml`, inside Docker: it addresses the demo servers by container name.
@@ -45,9 +44,9 @@ docker compose -f demo/docker-compose.yml down -v     # stop and wipe the worksp
 ```
 Then delete `demo/fleet/` and run `up` again for pristine configs.
 
-For the Claude planner, the Gemma 4 planner or IBM hardware, put `ANTHROPIC_API_KEY=...`, `GEMINI_API_KEY=...` or `QISKIT_IBM_TOKEN=...` in `demo/.env`.
+For the Claude planner or the Gemma 4 planner, put `ANTHROPIC_API_KEY=...` or `GEMINI_API_KEY=...` in `demo/.env`.
 
-The AegisQ container mounts the Docker socket so the agent can run `nginx -t` and reload inside the demo containers. That gives it control of Docker on your machine, so keep this setup to the demo.
+The AegisQ container mounts the Docker socket so the agent can run `nginx -t` / `sshd -t` and reload inside the demo containers. That gives it control of Docker on your machine, so keep this setup to the demo.
 
 ---
 
@@ -87,8 +86,8 @@ export AEGISQ_HOME=/tmp/aegisq-test
 
 | What | Command | Expect |
 |---|---|---|
-| Unit tests (fake servers, no Docker) | `pytest` | ~210 passed in about 30 s |
-| Quantum tests (Qiskit simulator) | included in `pytest` when Qiskit is installed | they skip automatically without it |
+| Unit tests (fake servers, no Docker) | `pytest` | about 220 passed in about 30 s |
+| Real OpenSSH migration | included in `pytest` when `sshd` is installed (`apt install openssh-server`) | a real sshd is scanned, migrated, verified and rolled back; skipped without it |
 | Integration tests (real containers) | `pytest -m integration` | `2 passed` (real scan + full migration with the planned failure) |
 | Lint and types | `ruff check src tests && python -m mypy` | `All checks passed!` / `Success: no issues found` |
 | Coverage | `pytest --cov` | about 83% |
@@ -176,12 +175,14 @@ Expected outcome:
 | app-modern | **fixed**: patched to `X25519MLKEM768:X25519:prime256v1`, `nginx -t` ok, reloaded, verified |
 | app-tls12 | **fixed**: TLS 1.3 enabled plus the hybrid group |
 | app-legacy | **failed**: `nginx -t` rejects the group, the old config is restored automatically, and the agent says *"nginx is linked against OpenSSL 3.0.x, which has no ML-KEM"* with an upgrade recommendation |
-| app-plain, ssh-legacy | **skipped**, with advice (needs TLS / sshd_config change) |
+| ssh-legacy | **fixed**: `KexAlgorithms mlkem768x25519-sha256,sntrup761x25519-sha512@openssh.com,curve25519-sha256` (the weak SHA-1 method is dropped), `sshd -t` ok, reloaded, verified with a fresh connection |
+| app-plain | **skipped**, with advice (needs TLS first) |
 
 Afterwards, check the results:
 ```bash
-aegisq scan demo/fleet.yaml                 # app-modern and app-tls12 now PQ READY; app-legacy still CLASSICAL and serving
+aegisq scan demo/fleet.yaml                 # app-modern, app-tls12 and ssh-legacy now PQ READY; app-legacy still CLASSICAL and serving
 grep ssl_ecdh_curve demo/fleet/*/conf.d/site.conf
+grep KexAlgorithms demo/fleet/ssh-legacy/sshd/sshd_config
 git --git-dir "$AEGISQ_HOME/patches/repo.git" branch     # one branch per proposal
 ```
 
@@ -222,6 +223,7 @@ Without make, `demo-reset` is:
 ```bash
 python3 demo/setup.py --configs-only
 for c in modern legacy tls12 ready plain; do docker exec aegisq-app-$c nginx -s reload; done
+docker kill --signal=HUP aegisq-ssh-legacy
 ```
 
 ## 6. Dashboard
@@ -229,7 +231,8 @@ for c in modern legacy tls12 ready plain; do docker exec aegisq-app-$c nginx -s 
 With `aegisq serve` running:
 - **Login:** the signed-out screen shows only the wordmark and the sign-in form. A wrong token gets "Invalid token"; the right one shows the dashboard.
 - **Headline:** reads "N% of your fleet is quantum-safe." with the at-risk count under it, both from the latest scan. The tiles beside it match `aegisq scan`'s summary.
-- **Nav links** (Risk ranking, Approvals, Quantum entropy, Audit log) jump to their sections; **Get the report** downloads the HTML report.
+- **Nav links** (Overview, Run, Approvals, Performance, Audit log) switch views; **Get the report** downloads the HTML report.
+- **Run:** pick *Inventory* and *Scan + fix*, start a run, approve each change beside the lattice, and check the four result steps at the end.
 - **Z slider:** moving it re-ranks services live, and the "already at risk" tile changes.
 - **Rows:** click a row to expand its findings.
 - **Rescan fleet:** runs a new scan (requires `--inventory`).
@@ -254,27 +257,17 @@ aegisq audit tail -n 20
 
 **Tamper test:** edit any line in `$AEGISQ_HOME/audit.jsonl` (change a status, for example). `aegisq audit verify` then reports the altered entry and exits `2`, and the dashboard badge turns red. To make the chain an HMAC chain, set `AEGISQ_AUDIT_KEY` before writing.
 
-## 8. Quantum entropy module
+## 8. Teams, schedules and alerts
 
-| What | Command | Expect |
+| What | How | Expect |
 |---|---|---|
-| Simulated, fast (default) | `aegisq entropy run --source simulated` | ~5 s. Prints `SIMULATED RUN` warning, h ≈ 0.92, ~910,000 extracted bits at ε = 2^-64, monobit/runs pass for both extracted bits and `os.urandom` |
-| Simulated, full device noise | `aegisq entropy run --source simulated --noise full` | ~45 s, h ≈ 0.93 |
-| Real IBM hardware | `QISKIT_IBM_TOKEN=... aegisq entropy run --source ibm` | prints the **IBM job ID**; time depends on IBM's queue. No `SIMULATED` warning |
-| Re-analyse a saved run and write a key | `aegisq entropy analyze --key-out key.bin` | key file created with mode 0600; only its fingerprint is printed |
-| Shor demo | `aegisq shor` | `period r = 4; factors of 15: [3, 5]` plus the "toy" disclaimer |
-| Shor on hardware | `aegisq shor --backend ibm` | the noisy hardware result, shown as measured |
-
-The dashboard's Quantum entropy section shows the charts, the heatmap and the guarantees table for the latest run.
-
-With the quantum Docker image (Qiskit preinstalled):
-```bash
-make image-quantum      # or: docker build --build-arg EXTRAS=agent,quantum -t aegisq:quantum .
-docker run --rm aegisq:quantum entropy run --source simulated      # ~7 s including container start
-docker run --rm aegisq:quantum shor
-docker run --rm -e QISKIT_IBM_TOKEN aegisq:quantum entropy run --source ibm
-```
-To keep results from a container run, add a workspace volume, e.g. `-v "$PWD/.aegisq:/var/lib/aegisq/workspace"`.
+| Create users | `aegisq users add priya --role approver` and `aegisq users add vic --role viewer` (or **Settings → Users**) | each prints a token once |
+| Roles | sign in as `vic` | Rescan, Start run and Approve are disabled; no Settings tab |
+| Separation of duties | as an admin or operator, start **Run → Scan + fix**; then sign in as `priya` in a private window and open **Approvals** | the starter sees "another approver has to approve" and no Approve button; `priya` approves and the run continues |
+| Last admin | try to remove or demote the only admin | refused: "at least one admin must remain" |
+| Webhook | **Settings → Alerts**, add a Slack/Teams webhook (or `https://webhook.site` for a throwaway URL), then **Send a test alert** | the message arrives; "delivered: HTTP 200" |
+| Approval alert | start a fix run with the webhook set | "a change to … is waiting for approval" within about 15 seconds |
+| Schedule | **Settings → Scheduled scans → Every hour** | a "Scheduled scan" job appears in the audit log when it runs |
 
 ## 9. Handshake benchmark
 
@@ -290,20 +283,40 @@ For full handshakes with curl, which needs curl built with OpenSSL 3.5:
 docker run --rm --network host aegisq benchmark https://localhost:8446/ -n 300 --method curl
 ```
 
-## 10. Real-world adoption gap (Tranco)
-
-```bash
-aegisq realworld --download        # top 500 vs random 500 from ranks 100k-1M; a few minutes
-```
-This needs normal internet access. A corporate proxy that intercepts TLS makes every site look like the proxy. Sanity check first: `echo cloudflare.com > h.txt && aegisq scan h.txt` should say `PQ READY`.
-
-## 11. Load tests (k6)
+## 10. Load tests (k6)
 
 ```bash
 make loadtest-smoke      # seconds per scenario
 make loadtest            # ~6 minutes, full size
 ```
 Expect each scenario to report `thresholds passed`. The workspace check should print `OK: every approval decided exactly once; audit chain intact`. The TLS scenario needs the demo fleet running. Details are in [loadtest/README.md](loadtest/README.md).
+
+## 11. Other servers
+
+The unit tests cover every server's patching, guardrails and STARTTLS with fakes (`pytest tests/test_servers.py`). To repeat the real-server run on an Ubuntu 24.04 machine or VM you can throw away (it changes `/etc/postfix`):
+
+```bash
+sudo apt-get install -y apache2 haproxy postfix dovecot-imapd dovecot-pop3d
+# OpenSSL 3.5 next to the system's 3.0 (same ABI, so the distro servers can load it)
+git clone --depth 1 --branch openssl-3.5.4 https://github.com/openssl/openssl.git && cd openssl
+./Configure --prefix=/opt/ossl --libdir=lib shared no-tests && make -j4 && sudo make install_sw
+```
+
+1. Start one instance of each server with an explicit classical list (for example `SSLOpenSSLConfCmd Groups X25519:prime256v1`, `ssl-default-bind-curves X25519:P-256`, `curves x25519 secp256r1`, `ssl_curve_list = X25519:prime256v1`), some with `LD_LIBRARY_PATH=/opt/ossl/lib` and some without. Postfix and Dovecot clear their environment, so also add `LD_LIBRARY_PATH=/opt/ossl/lib` to `import_environment` in their configs.
+2. List them in an inventory with `managed:` blocks. Give the OpenSSL 3.5 instances `tls_library: /opt/ossl/lib/libssl.so.3` and test/reload commands that set the same `LD_LIBRARY_PATH` (for example `[env, LD_LIBRARY_PATH=/opt/ossl/lib, apache2, -k, graceful, -f, FILE]`). Mail services need `starttls:`.
+3. `aegisq scan fleet.yaml`, then `aegisq migrate fleet.yaml --planner rules` and approve each change as a second user.
+
+Expected:
+
+| Server | Outcome |
+|---|---|
+| Apache, HAProxy, Caddy 2.10, Dovecot on OpenSSL 3.5 | fixed; a rescan shows `PQ READY` |
+| Postfix 3.10+ on OpenSSL 3.5 | fixed, verified over STARTTLS |
+| Apache on OpenSSL 3.0 | failed before any change: "OpenSSL 3.0.13 ... rejects X25519MLKEM768"; no approval requested |
+| HAProxy on OpenSSL 3.0 | `haproxy -c` fails, the old config is restored, diagnosis names OpenSSL 3.0.13 |
+| Postfix 3.8 | failed before any change: needs Postfix 3.10 |
+
+Every server keeps answering throughout (`curl -k https://127.0.0.1:PORT/`).
 
 ## 12. Cleanup
 
@@ -315,5 +328,4 @@ rm -rf "$AEGISQ_HOME"
 ## What can't be tested offline
 
 - **Claude and Gemma planners:** need `ANTHROPIC_API_KEY` or `GEMINI_API_KEY`. The offline tests use scripted fake models that try to bypass the guardrails, plus a local HTTP server for the Gemma client's retries.
-- **IBM hardware:** needs `QISKIT_IBM_TOKEN`. Offline, use `--source simulated`.
-- **Real-world scan:** needs internet without TLS interception.
+- **Scanning public sites:** needs internet without TLS interception.

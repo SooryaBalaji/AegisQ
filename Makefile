@@ -1,4 +1,4 @@
-.PHONY: install dev lint typecheck test test-all integration loadtest loadtest-smoke image-quantum demo-images demo-up demo-reload demo-reset demo-down image demo serve
+.PHONY: install dev lint typecheck test test-all integration loadtest loadtest-smoke demo-images demo-up demo-reload demo-reset demo-down image demo serve
 
 PY ?= python3
 
@@ -6,7 +6,7 @@ install:
 	$(PY) -m pip install .
 
 dev:
-	$(PY) -m pip install -e ".[dev,agent,quantum]"
+	$(PY) -m pip install -e ".[dev,agent]"
 
 lint:
 	ruff check src tests
@@ -32,6 +32,7 @@ demo-up:
 
 demo-reload:
 	for c in app-modern app-legacy app-tls12 app-ready app-plain; do docker exec aegisq-$$c nginx -s reload; done
+	docker kill --signal=HUP aegisq-ssh-legacy
 
 demo-reset:
 	$(PY) demo/setup.py --configs-only
@@ -42,10 +43,6 @@ demo-down:
 
 image:
 	docker build -t aegisq:latest .
-
-# Image with Qiskit preinstalled (saves the slow Qiskit install on every new machine).
-image-quantum:
-	docker build --build-arg EXTRAS=agent,quantum -t aegisq:quantum .
 
 # The 3-minute demo, scripted: scan, CBOM, risk, then the agent (approve on the dashboard).
 demo: demo-reset

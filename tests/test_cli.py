@@ -96,7 +96,7 @@ def test_errors_are_clean(runner, tmp_path) -> None:
     r = runner("scan", str(bad))
     assert r.exit_code == 1 and "host" in r.output
     assert runner("risk").exit_code == 1  # no scan yet
-    assert runner("entropy", "analyze").exit_code == 1
+    assert runner("entropy", "analyze").exit_code == 2  # removed command
 
 
 def test_doctor(runner) -> None:
@@ -106,7 +106,7 @@ def test_doctor(runner) -> None:
 
 def test_migrate_terminal_needs_tty(runner, inventory) -> None:
     r = runner("migrate", str(inventory), "--approve-in", "terminal", "--planner", "rules")
-    assert r.exit_code == 1 and "interactive terminal" in r.output
+    assert r.exit_code == 1 and "separation of duties" in r.output
     assert runner("migrate", str(inventory), "--service", "ghost").exit_code == 1
 
 

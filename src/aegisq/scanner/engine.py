@@ -109,7 +109,11 @@ async def scan_service(t: ServiceTarget, opts: ScanOptions) -> ServiceScan:
         return ServiceScan(service=t, status=Status.UNREACHABLE, backend=backend, errors=[msg])
     ip = ips[0]
     if t.protocol == Protocol.TLS:
-        res = await _scan_tls(t, ip, opts)
+        token = tls_probe.STARTTLS.set(t.starttls)
+        try:
+            res = await _scan_tls(t, ip, opts)
+        finally:
+            tls_probe.STARTTLS.reset(token)
     else:
         res = await _scan_ssh(t, ip, opts)
     res.backend = backend
@@ -148,6 +152,8 @@ async def _scan_tls(t: ServiceTarget, ip: str, opts: ScanOptions) -> ServiceScan
 
     if pq.outcome == "unreachable":
         return ServiceScan(service=t, status=Status.UNREACHABLE, tls=det, errors=[pq.detail or "unreachable"])
+    if pq.outcome == "not_tls" and t.starttls:
+        return ServiceScan(service=t, status=Status.ERROR, tls=det, errors=[pq.detail or "STARTTLS failed"])
     if pq.outcome == "not_tls":
         is_http, server = await tls_probe.http_plaintext_check(ip, t.port, t.server_name, opts.timeout)
         det.plaintext_http, det.http_server = is_http, server

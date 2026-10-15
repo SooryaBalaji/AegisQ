@@ -16,6 +16,7 @@ from aegisq.crypto_registry import SSH_PQ_PROBE_ORDER
 from aegisq.models import ProbeOutcome
 from aegisq.netutil import validate_host, validate_port
 from aegisq.proc import run_async, run_sync
+from aegisq.scanner.tls_probe import STARTTLS
 
 _ALERT_RE = re.compile(r"SSL alert number (\d+)")
 _GROUP_RE = re.compile(r"Negotiated TLS1\.3 group: (\S+)")
@@ -79,6 +80,8 @@ async def openssl_pq_probe(
     port = validate_port(port)
     connect = f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
     argv = [exe, "s_client", "-connect", connect, "-tls1_3", "-groups", group]
+    if STARTTLS.get():
+        argv += ["-starttls", str(STARTTLS.get())]
     if sni:
         argv += ["-servername", validate_host(sni)]
     res = await run_async(argv, timeout=timeout, stdin_data=b"")

@@ -42,7 +42,8 @@ def test_auth_required_everywhere(client) -> None:
         assert client.get(path, headers={"Authorization": "Bearer wrong-token-xxxxxxxx"}).status_code == 401
         assert client.get(path, headers={"Authorization": f"Basic {TOK_A}"}).status_code == 401
     assert client.get("/healthz").json()["status"] == "ok"
-    assert client.get("/api/me", headers=auth()).json() == {"identity": "alice"}
+    me = client.get("/api/me", headers=auth()).json()
+    assert me["identity"] == "alice" and me["role"] == "admin" and "approve" in me["permissions"]
 
 
 def test_security_headers_and_static(client) -> None:
@@ -55,10 +56,10 @@ def test_security_headers_and_static(client) -> None:
         icon = client.get(path)
         assert icon.status_code == 200 and icon.headers["content-type"] == "image/svg+xml" and "<svg" in icon.text
     assert 'href="/static/favicon.svg"' in r.text
-    for font in ("fredoka.woff2", "nunito.woff2"):
-        f = client.get(f"/static/{font}")
-        assert f.status_code == 200 and f.headers["content-type"] == "font/woff2" and f.content[:4] == b"wOF2"
-    assert client.get("/static/OFL-nunito.txt").status_code == 404  # licence ships in the package, not served
+    for css in ("app.css", "ui.css"):
+        assert client.get(f"/static/{css}").headers["content-type"].startswith("text/css")
+    assert 'href="/static/ui.css"' in r.text
+    assert client.get("/static/fredoka.woff2").status_code == 404  # no web fonts: system fonts only
     assert client.get("/static/../app.py").status_code == 404
     assert client.get("/static/secret.txt").status_code == 404
     assert client.get("/api/me", headers=auth()).headers["cache-control"] == "no-store"
@@ -71,7 +72,7 @@ def test_overview_and_cbom(client) -> None:
     assert client.get("/api/overview?z=500", headers=auth()).status_code == 422
     bom = client.get("/api/cbom", headers=auth()).json()
     assert bom["specVersion"] == "1.6"
-    assert client.get("/api/entropy", headers=auth()).status_code == 404
+    assert client.get("/api/entropy", headers=auth()).status_code == 404  # removed endpoint
     assert client.post("/api/scan", headers=auth()).status_code == 409  # no inventory configured
 
 
@@ -150,7 +151,7 @@ def test_capabilities(client) -> None:
     assert caps["jobs"] is True and caps["inventory"] is False and caps["services"] == []
     assert caps["planners"]["rules"]["ok"] is True
     assert caps["planners"]["local"]["ok"] is False and "GEMINI_API_KEY" in caps["planners"]["local"]["detail"]
-    assert caps["ibm"]["ok"] is False
+    assert "ibm" not in caps and "quantum" not in caps
     assert client.get("/api/capabilities").status_code == 401
 
 
@@ -167,8 +168,9 @@ def test_job_requests_are_validated(client) -> None:
     assert post({"kind": "scan", "targets": "\n".join(f"h{i}.example" for i in range(501))}) == 422
     assert post({"kind": "migrate", "planner": "rules"}) == 409  # needs an inventory
     assert post({"kind": "migrate", "planner": "gpt"}) == 422
-    assert post({"kind": "entropy", "source": "dwave"}) == 422
-    assert post({"kind": "shor", "backend": "ibm_fez; rm"}) == 422
+    assert post({"kind": "entropy", "source": "simulated"}) == 422  # removed job kinds
+    assert post({"kind": "shor", "backend": "aer"}) == 422
+    assert post({"kind": "realworld"}) == 422
     for url in ("http://a.example/", "https://user:pw@a.example/", "https://-x/", "ftp://a.example", "https://"):
         assert post({"kind": "benchmark", "url": url}) == 422, url
     assert post({"kind": "benchmark", "url": "https://a.example/", "n": 1}) == 422

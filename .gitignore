@@ -225,3 +225,5 @@ demo/fleet/
 cbom.json
 *.aegisq-key
 loadtest/out/
+
+frontend/node_modules/

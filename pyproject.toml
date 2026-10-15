@@ -32,7 +32,6 @@ dependencies = [
 
 [project.optional-dependencies]
 agent = ["anthropic>=0.70"]
-quantum = ["qiskit>=1.2", "qiskit-aer>=0.15", "qiskit-ibm-runtime>=0.30"]
 dev = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
@@ -42,7 +41,7 @@ dev = [
   "mypy>=1.10",
   "types-PyYAML",
 ]
-all = ["aegisq[agent,quantum]"]
+all = ["aegisq[agent]"]
 
 [project.scripts]
 aegisq = "aegisq.cli:main"
@@ -59,7 +58,6 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
   "integration: needs Docker and the demo fleet images (deselect with -m 'not integration')",
-  "quantum: needs qiskit / qiskit-aer",
 ]
 addopts = "-ra -m 'not integration'"
 filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]

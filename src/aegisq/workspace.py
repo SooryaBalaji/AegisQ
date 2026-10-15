@@ -71,37 +71,19 @@ class Approval:
     decided_by: str | None
     decided_at: float | None
     reason: str | None
+    initiated_by: str | None = None
+    require_other: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
 
 
-class ApprovalStore:
-    """Human approvals, persisted in SQLite so the dashboard, CLI and agent can be separate processes."""
+class Sqlite:
+    """One SQLite file (state.db) shared by every store; one connection per thread."""
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self._local = threading.local()
-        with self._conn() as c:
-            c.execute(
-                """CREATE TABLE IF NOT EXISTS approvals (
-                    id TEXT PRIMARY KEY,
-                    service TEXT NOT NULL,
-                    proposal_id TEXT NOT NULL,
-                    diff TEXT NOT NULL,
-                    diff_sha256 TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK (status IN
-                        ('pending','approved','rejected','expired','consumed','cancelled')),
-                    requested_by TEXT NOT NULL,
-                    requested_at REAL NOT NULL,
-                    expires_at REAL NOT NULL,
-                    decided_by TEXT,
-                    decided_at REAL,
-                    reason TEXT
-                )"""
-            )
-            c.execute("CREATE INDEX IF NOT EXISTS approvals_status ON approvals(status)")
 
     @contextmanager
     def _conn(self, write: bool = True) -> Any:
@@ -123,6 +105,39 @@ class ApprovalStore:
             conn.execute("ROLLBACK")
             raise
 
+
+class ApprovalStore(Sqlite):
+    """Human approvals, persisted in SQLite so the dashboard, CLI and agent can be separate processes."""
+
+    def __init__(self, db_path: Path) -> None:
+        super().__init__(db_path)
+        with self._conn() as c:
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS approvals (
+                    id TEXT PRIMARY KEY,
+                    service TEXT NOT NULL,
+                    proposal_id TEXT NOT NULL,
+                    diff TEXT NOT NULL,
+                    diff_sha256 TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN
+                        ('pending','approved','rejected','expired','consumed','cancelled')),
+                    requested_by TEXT NOT NULL,
+                    requested_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    decided_by TEXT,
+                    decided_at REAL,
+                    reason TEXT
+                )"""
+            )
+            c.execute("CREATE INDEX IF NOT EXISTS approvals_status ON approvals(status)")
+
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(approvals)")}
+            if "initiated_by" not in cols:
+                c.execute("ALTER TABLE approvals ADD COLUMN initiated_by TEXT")
+            if "require_other" not in cols:
+                c.execute("ALTER TABLE approvals ADD COLUMN require_other INTEGER NOT NULL DEFAULT 0")
+
     def _expire(self, c: sqlite3.Connection) -> None:
         c.execute(
             "UPDATE approvals SET status='expired' WHERE status IN ('pending','approved') AND expires_at < ?",
@@ -130,7 +145,16 @@ class ApprovalStore:
         )
 
     def create(
-        self, service: str, proposal_id: str, diff: str, diff_sha256: str, summary: str, requested_by: str, ttl: float
+        self,
+        service: str,
+        proposal_id: str,
+        diff: str,
+        diff_sha256: str,
+        summary: str,
+        requested_by: str,
+        ttl: float,
+        initiated_by: str | None = None,
+        require_other: bool = False,
     ) -> Approval:
         now = time.time()
         aid = uuid.uuid4().hex[:12]
@@ -142,8 +166,20 @@ class ApprovalStore:
             )
             c.execute(
                 "INSERT INTO approvals (id, service, proposal_id, diff, diff_sha256, summary, status, requested_by,"
-                " requested_at, expires_at) VALUES (?,?,?,?,?,?, 'pending', ?,?,?)",
-                (aid, service, proposal_id, diff, diff_sha256, summary, requested_by, now, now + ttl),
+                " requested_at, expires_at, initiated_by, require_other) VALUES (?,?,?,?,?,?, 'pending', ?,?,?,?,?)",
+                (
+                    aid,
+                    service,
+                    proposal_id,
+                    diff,
+                    diff_sha256,
+                    summary,
+                    requested_by,
+                    now,
+                    now + ttl,
+                    initiated_by,
+                    int(bool(require_other and initiated_by)),
+                ),
             )
         got = self.get(aid)
         assert got is not None
@@ -153,7 +189,7 @@ class ApprovalStore:
     _EFFECTIVE = "CASE WHEN status IN ('pending','approved') AND expires_at < :now THEN 'expired' ELSE status END"
     _COLUMNS = (
         "id, service, proposal_id, diff, diff_sha256, summary, requested_by, requested_at, expires_at, "
-        f"decided_by, decided_at, reason, {_EFFECTIVE} AS status"
+        f"decided_by, decided_at, reason, initiated_by, require_other, {_EFFECTIVE} AS status"
     )
 
     def get(self, aid: str) -> Approval | None:
@@ -182,6 +218,9 @@ class ApprovalStore:
             raise ValueError("approver or reason too long")
         with self._conn() as c:
             self._expire(c)
+            row = c.execute("SELECT initiated_by, require_other FROM approvals WHERE id=?", (aid,)).fetchone()
+            if approve and row and row["require_other"] and (row["initiated_by"] or "").lower() == by.lower():
+                raise PermissionError(f"{by} started this run, so another approver must decide (separation of duties)")
             cur = c.execute(
                 "UPDATE approvals SET status=?, decided_by=?, decided_at=?, reason=? WHERE id=? AND status='pending'",
                 ("approved" if approve else "rejected", by, time.time(), reason, aid),
@@ -229,7 +268,7 @@ class ApprovalStore:
 class Workspace:
     def __init__(self, home: str | Path) -> None:
         self.home = Path(home).expanduser().resolve()
-        for sub in ("scans", "backups", "reports", "entropy", "patches", "benchmarks", "realworld"):
+        for sub in ("scans", "backups", "reports", "patches", "benchmarks"):
             (self.home / sub).mkdir(parents=True, exist_ok=True)
         os.chmod(self.home, 0o750)  # noqa: S103 - owner+group only, deliberately not world-readable
         self.audit = AuditLog(self.home / "audit.jsonl")

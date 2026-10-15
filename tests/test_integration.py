@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,8 @@ def fleet():
         subprocess.run([sys.executable, str(DEMO / "setup.py"), "--configs-only"], check=True, capture_output=True)
         for c in CONTAINERS:
             subprocess.run(["docker", "exec", c, "nginx", "-s", "reload"], check=True, capture_output=True)
+        subprocess.run(["docker", "kill", "--signal=HUP", "aegisq-ssh-legacy"], check=True, capture_output=True)
+        time.sleep(1)  # sshd restarts on SIGHUP
 
     reset()
     # fleet.docker.yaml addresses servers by container name (when the tests themselves run in Docker)
@@ -76,10 +79,11 @@ def test_full_migration_with_planned_failure(fleet, ws, cfg) -> None:
     assert summary.outcomes["app-modern"] == "fixed"
     assert summary.outcomes["app-tls12"] == "fixed"
     assert summary.outcomes["app-legacy"] == "failed"
+    assert summary.outcomes["ssh-legacy"] == "fixed"
     assert "OpenSSL 3.0" in summary.notes["app-legacy"][0]
     legacy = (DEMO / "fleet/app-legacy/conf.d/site.conf").read_text()
     assert "ssl_ecdh_curve X25519:prime256v1;" in legacy  # restored
     _, st = scan(fleet)
-    assert st["app-modern"] == st["app-tls12"] == Status.PQ_READY
+    assert st["app-modern"] == st["app-tls12"] == st["ssh-legacy"] == Status.PQ_READY
     assert st["app-legacy"] == Status.CLASSICAL  # still serving, untouched
     assert ws.audit.verify().ok

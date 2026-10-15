@@ -24,7 +24,6 @@ for _var in (
     "AEGISQ_LLM_BASE_URL",
     "AEGISQ_LLM_MODEL",
     "AEGISQ_LLM_API_KEY",
-    "QISKIT_IBM_TOKEN",
     "AEGISQ_AUDIT_KEY",
 ):
     os.environ.pop(_var, None)
@@ -82,17 +81,3 @@ def fake_nginx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, obj
     monkeypatch.setenv("FAKE_NGINX_STATE", str(state))
     monkeypatch.setenv("FAKE_OPENSSL", "3.5.0")
     return {"conf": conf, "state": state, "argv": [sys.executable, str(exe)], "dir": d}
-
-
-def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    try:
-        import qiskit  # noqa: F401
-        import qiskit_aer  # noqa: F401
-
-        have_quantum = True
-    except ImportError:
-        have_quantum = False
-    skip_q = pytest.mark.skip(reason="qiskit / qiskit-aer not installed")
-    for item in items:
-        if "quantum" in item.keywords and not have_quantum:
-            item.add_marker(skip_q)

@@ -8,9 +8,9 @@ import ssl
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from aegisq.models import ServiceTarget
+from aegisq.models import ManagedNginx, ManagedServer, ServiceTarget
 from aegisq.netutil import resolve
-from aegisq.scanner import tls_probe
+from aegisq.scanner import ssh_probe, tls_probe
 
 
 @dataclass
@@ -21,7 +21,7 @@ class HealthResult:
 
 
 async def http_health(service: ServiceTarget, timeout: float = 5.0) -> HealthResult:
-    m = service.managed
+    m = service.managed if isinstance(service.managed, (ManagedNginx, ManagedServer)) else None
     url = m.health_url if m and m.health_url else f"https://{service.endpoint}/"
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
@@ -80,8 +80,36 @@ def _is_ip(s: str) -> bool:
 
 
 async def pq_check(service: ServiceTarget, timeout: float = 5.0) -> tuple[bool, str]:
+    tls_probe.STARTTLS.set(service.starttls)
     ips = await resolve(service.host, service.port, timeout)
     out = await tls_probe.probe_pq(ips[0], service.port, service.server_name, timeout)
     if out.outcome == "accepted":
         return True, f"negotiated {out.group} ({out.server_key_share_bytes}-byte server share)"
     return False, out.detail or out.outcome
+
+
+async def tls_health(service: ServiceTarget, timeout: float = 5.0) -> HealthResult:
+    """For mail servers: a client with no post-quantum support must still complete a handshake."""
+    tls_probe.STARTTLS.set(service.starttls)
+    try:
+        ips = await resolve(service.host, service.port, timeout)
+    except (OSError, asyncio.TimeoutError) as e:
+        return HealthResult(False, None, f"unreachable: {type(e).__name__}: {e}")
+    out = await tls_probe.probe_classical(ips[0], service.port, service.server_name, timeout)
+    if out.outcome == "accepted":
+        return HealthResult(True, None, f"a classical-only client still connects ({out.version}, {out.group})")
+    return HealthResult(False, None, f"a classical-only client failed: {out.detail or out.outcome}")
+
+
+async def ssh_check(service: ServiceTarget, timeout: float = 5.0) -> tuple[bool, bool, str]:
+    """(pq_ok, reachable, detail): read the server's KEXINIT again, as a fresh client would."""
+    try:
+        ips = await resolve(service.host, service.port, timeout)
+        d = await ssh_probe.probe_ssh(ips[0], service.port, timeout)
+    except ssh_probe.SSHProbeError as e:
+        return False, False, f"{e.kind}: {e.detail}"
+    except (OSError, asyncio.TimeoutError) as e:
+        return False, False, f"unreachable: {type(e).__name__}: {e}"
+    if d.pq_ready:
+        return True, True, f"offers {', '.join(d.pq_kex_offered)}; a PQ-only client negotiates {d.negotiated_kex}"
+    return False, True, f"no post-quantum key exchange offered ({', '.join(d.kex_algorithms[:3])}...)"

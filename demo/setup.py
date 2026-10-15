@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare the demo fleet: copy pristine nginx configs into fleet/ and create a local CA + server cert.
+"""Prepare the demo fleet: copy pristine nginx and sshd configs into fleet/ and create a local CA + server cert.
 
 Run again at any time to reset the fleet to its starting (mostly classical) state.
 """
@@ -20,6 +20,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 HERE = Path(__file__).resolve().parent
 SERVICES = ["app-modern", "app-legacy", "app-tls12", "app-ready", "app-plain"]
+SSH_SERVICES = ["ssh-legacy"]
 
 
 def _name(cn: str) -> x509.Name:
@@ -69,13 +70,13 @@ def make_certs(out: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--configs-only", action="store_true", help="reset nginx configs, keep certificates")
+    parser.add_argument("--configs-only", action="store_true", help="reset nginx and sshd configs, keep certificates")
     parser.add_argument("--if-missing", action="store_true", help="do nothing if the fleet is already set up")
     args = parser.parse_args()
     fleet = HERE / "fleet"
     if args.if_missing and (fleet / "certs" / "server.crt").exists() and all(
         (fleet / svc / "conf.d" / "site.conf").exists() for svc in SERVICES
-    ):
+    ) and all((fleet / svc / "sshd" / "sshd_config").exists() for svc in SSH_SERVICES):
         print(f"demo fleet already set up in {fleet}")
         return
     for svc in SERVICES:
@@ -84,6 +85,13 @@ def main() -> None:
         tmp = conf_dir / ".site.conf.tmp"
         shutil.copyfile(HERE / "templates" / f"{svc}.conf", tmp)
         os.replace(tmp, conf_dir / "site.conf")
+    for svc in SSH_SERVICES:
+        conf_dir = fleet / svc / "sshd"
+        conf_dir.mkdir(parents=True, exist_ok=True)
+        tmp = conf_dir / ".sshd_config.tmp"
+        shutil.copyfile(HERE / "templates" / f"{svc}.conf", tmp)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, conf_dir / "sshd_config")
     if not args.configs_only or not (fleet / "certs" / "server.crt").exists():
         make_certs(fleet / "certs")
     print(f"demo fleet ready in {fleet} (if containers are running: `make demo-reload`)")

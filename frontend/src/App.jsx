@@ -2,16 +2,28 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AuthError, loadToken, makeApi, saveToken, startJob } from "./api.js";
 import Login from "./Login.jsx";
 import Overview from "./Overview.jsx";
-import Run from "./Run.jsx";
 import Approvals from "./Approvals.jsx";
 import Measure from "./Measure.jsx";
-import Quantum from "./Quantum.jsx";
+import Settings from "./Settings.jsx";
 import Audit from "./Audit.jsx";
+import Landing from "./aq/Landing.jsx";
+import Console from "./aq/Console.jsx";
 
 const TABS = [
-  ["overview", "Overview"], ["run", "Run"], ["approvals", "Approvals"], ["quantum", "Quantum"], ["measure", "Measurements"], ["audit", "Audit log"],
+  ["overview", "Overview"], ["approvals", "Approvals"], ["measure", "Performance"], ["audit", "Audit log"],
 ];
-const TAB_OF = { "": "overview", overview: "overview", top: "overview", risk: "overview", run: "run", approvals: "approvals", quantum: "quantum", "entropy-section": "quantum", "shor-section": "quantum", measure: "measure", audit: "audit" };
+const TAB_OF = { "": "overview", overview: "overview", top: "overview", risk: "overview", approvals: "approvals", measure: "measure", audit: "audit", settings: "settings" };
+
+function useHash() {
+  const read = () => location.hash.replace(/^#/, "");
+  const [hash, setHash] = useState(read);
+  useEffect(() => {
+    const on = () => setHash(read());
+    window.addEventListener("hashchange", on);
+    return () => window.removeEventListener("hashchange", on);
+  }, []);
+  return hash;
+}
 
 function useHashTab() {
   const read = () => TAB_OF[location.hash.replace(/^#/, "")] || "overview";
@@ -26,11 +38,13 @@ function useHashTab() {
 
 export default function App() {
   const [token, setToken] = useState(loadToken);
-  const [who, setWho] = useState(null);
+  const [me, setMe] = useState(null);
+  const who = me ? me.identity : null;
   const [loginError, setLoginError] = useState("");
+  const hash = useHash();
 
   const signOut = useCallback((msg = "") => {
-    saveToken(null); setToken(null); setWho(null); setLoginError(msg);
+    saveToken(null); setToken(null); setMe(null); setLoginError(msg);
   }, []);
 
   const client = useMemo(() => (token ? makeApi(token) : null), [token]);
@@ -39,7 +53,7 @@ export default function App() {
     if (!client) return;
     let live = true;
     client.api("/api/me")
-      .then((me) => { if (live) setWho(me.identity); })
+      .then((m) => { if (live) setMe(m); })
       .catch((e) => { if (live) signOut(e instanceof AuthError ? "Invalid token." : `Cannot reach AegisQ: ${e.message}`); });
     return () => { live = false; };
   }, [client, signOut]);
@@ -48,7 +62,12 @@ export default function App() {
 
   useEffect(() => { document.body.classList.toggle("signed-out", !who); }, [who]);
 
+  if (hash === "intro") return <Landing signedIn={!!who} />;
+  if (hash === "console" || hash === "run") {
+    return <Console token={token} onSignIn={signIn} onSignOut={(msg) => signOut(msg)} />;
+  }
   if (!client || !who) {
+    if (hash !== "signin" && !loginError && !token) return <Landing signedIn={false} />;
     return (
       <>
         <NavShell />
@@ -56,29 +75,31 @@ export default function App() {
       </>
     );
   }
-  return <Dashboard client={client} who={who} signOut={signOut} />;
+  return <Dashboard client={client} me={me} signOut={signOut} />;
 }
 
 function NavShell({ children }) {
   return (
     <div className="nav-wrap">
       <header className="nav" aria-label="AegisQ">
-        <a className="wordmark" href="#overview" aria-label="AegisQ home">AEGIS<span>Q</span></a>
+        <a className="wordmark" href="#intro" aria-label="AegisQ intro">AEGIS<span>Q</span></a>
         {children}
       </header>
     </div>
   );
 }
 
-function Dashboard({ client, who, signOut }) {
+function Dashboard({ client, me, signOut }) {
+  const who = me.identity;
+  const perms = new Set(me.permissions || []);
+  const tabs = perms.has("admin") ? [...TABS, ["settings", "Settings"]] : TABS;
   const tab = useHashTab();
   const [z, setZ] = useState(10);
   const [overview, setOverview] = useState(null);
   const [approvals, setApprovals] = useState([]);
   const [audit, setAudit] = useState({ rows: [], verify: null });
-  const [caps, setCaps] = useState(null);
   const [jobs, setJobs] = useState([]);
-  const [extras, setExtras] = useState({ realworld: null, benchmark: null, entropy: null, shor: null });
+  const [benchmark, setBenchmark] = useState(null);
   const seen = useRef({});
   const zSet = useRef(false);
 
@@ -103,12 +124,7 @@ function Dashboard({ client, who, signOut }) {
     setAudit({ rows: rows || [], verify });
   }), [client, guarded]);
 
-  const loadExtras = useCallback(() => guarded(async () => {
-    const [realworld, benchmark, entropy, shor] = await Promise.all([
-      client.api("/api/realworld"), client.api("/api/benchmark"), client.api("/api/entropy"), client.api("/api/shor"),
-    ]);
-    setExtras({ realworld, benchmark, entropy, shor });
-  }), [client, guarded]);
+  const loadExtras = useCallback(() => guarded(async () => setBenchmark(await client.api("/api/benchmark"))), [client, guarded]);
 
   const refreshResults = useCallback(() => {
     loadOverview(); loadExtras(); loadAudit(); loadApprovals();
@@ -127,7 +143,6 @@ function Dashboard({ client, who, signOut }) {
 
   useEffect(() => {
     loadOverview().then(() => {
-      guarded(async () => setCaps(await client.api("/api/capabilities")));
       loadJobs(); loadApprovals(); loadAudit(); loadExtras();
     });
     const t = [
@@ -148,7 +163,11 @@ function Dashboard({ client, who, signOut }) {
     <>
       <NavShell>
         <nav className="nav-links" aria-label="Sections">
-          {TABS.map(([id, label]) => (
+          {tabs.slice(0, 1).map(([id, label]) => (
+            <a key={id} href={`#${id}`} aria-current={tab === id ? "page" : undefined}>{label}</a>
+          ))}
+          <a href="#console">Run</a>
+          {tabs.slice(1).map(([id, label]) => (
             <a key={id} href={`#${id}`} aria-current={tab === id ? "page" : undefined}>
               {label}
               {id === "approvals" && pending.length > 0 && <> <span className="count">{pending.length}</span></>}
@@ -156,7 +175,7 @@ function Dashboard({ client, who, signOut }) {
           ))}
         </nav>
         <div className="nav-right">
-          <span className="nav-who">{who}</span>
+          <span className="nav-who" title={`permissions: ${[...perms].join(", ")}`}>{who} · {me.role}</span>
           <span className={`badge badge-dark s-${auditKind}`} title={ver && !ver.ok ? ver.error : `${ver ? (ver.keyed ? "HMAC" : "SHA-256") : ""} hash chain`}>{auditText}</span>
           <button className="link-btn" type="button" onClick={() => signOut("")}>Sign out</button>
           <a className="button pill" href="#" onClick={(e) => { e.preventDefault(); client.download(`/api/report.html?z=${z}`, "aegisq-report.html"); }}>Get the report</a>
@@ -164,15 +183,12 @@ function Dashboard({ client, who, signOut }) {
       </NavShell>
       <main id="app">
         {tab === "overview" && (
-          <Overview overview={overview} z={z} setZ={setZ} client={client}
+          <Overview overview={overview} z={z} setZ={setZ} client={client} canRun={perms.has("run")}
             onRescan={() => startJob(client, { kind: "scan" }, loadJobs, signOut)} />
         )}
-        {tab === "run" && (
-          <Run client={client} caps={caps} jobs={jobs} pending={pending} loadJobs={loadJobs} signOut={signOut} />
-        )}
-        {tab === "approvals" && <Approvals client={client} approvals={approvals} reload={loadApprovals} />}
-        {tab === "quantum" && <Quantum entropy={extras.entropy} shor={extras.shor} />}
-        {tab === "measure" && <Measure realworld={extras.realworld} benchmark={extras.benchmark} />}
+        {tab === "approvals" && <Approvals client={client} approvals={approvals} reload={loadApprovals} me={me} />}
+        {tab === "measure" && <Measure benchmark={benchmark} client={client} jobs={jobs} loadJobs={loadJobs} signOut={signOut} canRun={perms.has("run")} />}
+        {tab === "settings" && perms.has("admin") && <Settings client={client} me={me} />}
         {tab === "audit" && <Audit rows={audit.rows} />}
       </main>
     </>

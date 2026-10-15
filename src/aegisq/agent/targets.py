@@ -7,7 +7,7 @@ import stat
 from pathlib import Path
 
 from aegisq.agent.guardrails import MAX_CONFIG_BYTES
-from aegisq.models import ManagedNginx, ServiceTarget
+from aegisq.models import ManagedNginx, ManagedServer, ManagedSSHD, ServiceTarget
 from aegisq.proc import CmdResult, run_sync
 from aegisq.workspace import atomic_write
 
@@ -16,13 +16,17 @@ class TargetUnavailable(RuntimeError):
     pass
 
 
-class NginxTarget:
+class ConfigTarget:
+    """A managed config file plus its test/reload/version commands."""
+
     def __init__(self, service: ServiceTarget) -> None:
         if service.managed is None:
             raise TargetUnavailable(f"{service.name} is not managed by AegisQ (scan-only)")
         self.service = service
-        self.m: ManagedNginx = service.managed
+        self.m: ManagedNginx | ManagedSSHD | ManagedServer = service.managed
+        self.kind = self.m.kind
         self.path = Path(self.m.config_path)
+        self.tls_library = self.m.tls_library if isinstance(self.m, ManagedServer) else None
 
     def _check_path(self) -> None:
         try:
@@ -48,12 +52,17 @@ class NginxTarget:
         atomic_write(self.path, text, mode=mode)
 
     def test(self) -> CmdResult:
+        assert self.m.test_cmd is not None
         return run_sync(self.m.test_cmd, timeout=self.m.command_timeout)
 
     def reload(self) -> CmdResult:
+        assert self.m.reload_cmd is not None
         return run_sync(self.m.reload_cmd, timeout=self.m.command_timeout)
 
     def version(self) -> CmdResult | None:
         if not self.m.version_cmd:
             return None
         return run_sync(self.m.version_cmd, timeout=self.m.command_timeout)
+
+
+NginxTarget = ConfigTarget

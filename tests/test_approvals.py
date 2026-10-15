@@ -59,6 +59,6 @@ def test_wait_returns_decision_or_times_out(ws: Workspace) -> None:
 def test_workspace_paths_are_confined(ws: Workspace) -> None:
     with pytest.raises(ValueError):
         ws.save_json("../escape.json", {})
-    ws.save_json("entropy/x.json", {"a": 1})
-    assert ws.load_json("entropy/x.json") == {"a": 1}
-    assert ws.load_json("entropy/missing.json") is None
+    ws.save_json("benchmarks/x.json", {"a": 1})
+    assert ws.load_json("benchmarks/x.json") == {"a": 1}
+    assert ws.load_json("benchmarks/missing.json") is None

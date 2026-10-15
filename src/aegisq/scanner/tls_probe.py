@@ -10,6 +10,7 @@ import ssl
 import struct
 import time
 import warnings
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,6 +31,13 @@ from aegisq.models import CertInfo, ProbeOutcome
 from aegisq.scanner import tls_wire as w
 
 MAX_READ = 256 * 1024
+STARTTLS_PROTOCOLS = ("smtp", "imap", "pop3")
+# Set per scan task: when it names a protocol, every connection negotiates STARTTLS before the ClientHello.
+STARTTLS: ContextVar[str | None] = ContextVar("aegisq_starttls", default=None)
+
+
+class StartTLSRefused(Exception):
+    """The server did not upgrade the connection with STARTTLS."""
 
 
 @dataclass
@@ -45,7 +53,74 @@ class RawExchange:
 
 
 async def _open(ip: str, port: int, timeout: float) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    return await asyncio.wait_for(asyncio.open_connection(ip, port), timeout)
+    reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout)
+    proto = STARTTLS.get()
+    if proto:
+        try:
+            await asyncio.wait_for(starttls(reader, writer, proto), timeout)
+        except BaseException:
+            await _close(writer)
+            raise
+    return reader, writer
+
+
+async def _reply_line(reader: asyncio.StreamReader) -> str:
+    raw = await reader.readline()
+    if not raw:
+        raise StartTLSRefused("connection closed during STARTTLS")
+    return raw.decode("latin-1").rstrip("\r\n")
+
+
+async def _smtp_reply(reader: asyncio.StreamReader) -> tuple[str, list[str]]:
+    lines: list[str] = []
+    while len(lines) < 200:
+        line = await _reply_line(reader)
+        if len(line) < 3 or not line[:3].isdigit():
+            raise StartTLSRefused(f"not an SMTP reply: {line[:60]!r}")
+        lines.append(line)
+        if line[3:4] != "-":
+            return line[:3], lines
+    raise StartTLSRefused("SMTP reply too long")
+
+
+async def starttls(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, proto: str) -> None:
+    """Upgrade a plaintext SMTP, IMAP or POP3 session (RFC 3207, 3501, 2595) so a ClientHello can follow."""
+    if proto == "smtp":
+        code, _ = await _smtp_reply(reader)
+        if code != "220":
+            raise StartTLSRefused(f"SMTP greeting {code}")
+        writer.write(b"EHLO aegisq.invalid\r\n")
+        code, lines = await _smtp_reply(reader)
+        if code != "250":
+            raise StartTLSRefused(f"EHLO answered {code}")
+        if not any(line[4:].strip().upper().split()[:1] == ["STARTTLS"] for line in lines):
+            raise StartTLSRefused("server does not offer STARTTLS")
+        writer.write(b"STARTTLS\r\n")
+        code, _ = await _smtp_reply(reader)
+        if code != "220":
+            raise StartTLSRefused(f"STARTTLS answered {code}")
+    elif proto == "imap":
+        greeting = await _reply_line(reader)
+        if not greeting.upper().startswith(("* OK", "* PREAUTH")):
+            raise StartTLSRefused(f"not an IMAP greeting: {greeting[:60]!r}")
+        writer.write(b"A1 STARTTLS\r\n")
+        for _ in range(50):
+            line = await _reply_line(reader)
+            if line.upper().startswith("A1 "):
+                if line.upper().startswith("A1 OK"):
+                    return
+                raise StartTLSRefused(f"STARTTLS refused: {line[:80]!r}")
+        raise StartTLSRefused("no tagged STARTTLS reply")
+    elif proto == "pop3":
+        greeting = await _reply_line(reader)
+        if not greeting.startswith("+OK"):
+            raise StartTLSRefused(f"not a POP3 greeting: {greeting[:60]!r}")
+        writer.write(b"STLS\r\n")
+        line = await _reply_line(reader)
+        if not line.startswith("+OK"):
+            raise StartTLSRefused(f"STLS refused: {line[:80]!r}")
+    else:
+        raise ValueError(f"unsupported STARTTLS protocol {proto!r}")
 
 
 async def _close(writer: asyncio.StreamWriter) -> None:
@@ -59,7 +134,12 @@ async def exchange(ip: str, port: int, hello: bytes, timeout: float, *, follow_t
     t0 = time.perf_counter()
     try:
         reader, writer = await _open(ip, port, timeout)
-    except (OSError, asyncio.TimeoutError) as e:
+    except StartTLSRefused as e:
+        return RawExchange("not_tls", detail=f"STARTTLS failed: {e}", elapsed_ms=_ms(t0))
+    except asyncio.TimeoutError:
+        detail = "no STARTTLS answer in time" if STARTTLS.get() else "timed out"
+        return RawExchange("unreachable" if not STARTTLS.get() else "not_tls", detail=detail, elapsed_ms=_ms(t0))
+    except OSError as e:
         return RawExchange("unreachable", detail=_err(e), elapsed_ms=_ms(t0))
     try:
         writer.write(hello)
@@ -238,6 +318,16 @@ async def probe_modern(ip: str, port: int, sni: str | None, timeout: float) -> P
     return _outcome_from(ex, built, groups, accept_version=None)
 
 
+async def probe_classical(ip: str, port: int, sni: str | None, timeout: float) -> ProbeOutcome:
+    """A client with no post-quantum support: X25519 and P-256 only, TLS 1.3 and 1.2."""
+    groups = (X25519.code, 0x0017, 0x0018)
+    built = w.build_client_hello(
+        w.ClientHelloSpec(sni, (0x0304, 0x0303), tuple(TLS13_SUITES) + tuple(TLS12_SUITES), groups, groups[:1])
+    )
+    ex = await exchange(ip, port, built.record, timeout)
+    return _outcome_from(ex, built, groups, accept_version=None)
+
+
 @dataclass
 class TLS12Result:
     outcome: ProbeOutcome
@@ -286,6 +376,8 @@ async def fetch_certificate(ip: str, port: int, sni: str | None, timeout: float)
         warnings.simplefilter("ignore", DeprecationWarning)
         ctx.minimum_version = ssl.TLSVersion.TLSv1  # inspect old servers too
     server_hostname = sni if sni and not w._is_ip(sni) else None
+    if STARTTLS.get():
+        return await _starttls_certificate(ip, port, ctx, server_hostname, timeout)
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(ip, port, ssl=ctx, server_hostname=server_hostname), timeout
@@ -298,6 +390,31 @@ async def fetch_certificate(ip: str, port: int, sni: str | None, timeout: float)
     finally:
         del reader
         await _close(writer)
+
+
+async def _starttls_certificate(
+    ip: str, port: int, ctx: ssl.SSLContext, server_hostname: str | None, timeout: float
+) -> bytes | None:
+    try:
+        reader, writer = await _open(ip, port, timeout)
+    except (OSError, asyncio.TimeoutError, StartTLSRefused):
+        return None
+    loop = asyncio.get_running_loop()
+    try:
+        tls = await asyncio.wait_for(
+            loop.start_tls(writer.transport, writer.transport.get_protocol(), ctx, server_hostname=server_hostname),
+            timeout,
+        )
+    except (OSError, asyncio.TimeoutError, ssl.SSLError):
+        await _close(writer)
+        return None
+    try:
+        sslobj = tls.get_extra_info("ssl_object") if tls else None
+        return sslobj.getpeercert(binary_form=True) if sslobj else None
+    finally:
+        del reader
+        if tls:
+            tls.abort()
 
 
 def parse_certificate(der: bytes, now: dt.datetime | None = None) -> CertInfo:

@@ -12,7 +12,7 @@ x-nginx: &nginx
     retries: 3
 
 x-aegisq: &aegisq
-  build: { context: .., target: demo, args: { EXTRAS: "agent,quantum" } }
+  build: { context: .., target: demo, args: { EXTRAS: "agent" } }
   image: aegisq:demo
   working_dir: /demo
   environment:
@@ -25,7 +25,6 @@ x-aegisq: &aegisq
     AEGISQ_LLM_BASE_URL: ${AEGISQ_LLM_BASE_URL:-}
     AEGISQ_LLM_MODEL: ${AEGISQ_LLM_MODEL:-}
     AEGISQ_LLM_API_KEY: ${AEGISQ_LLM_API_KEY:-}
-    QISKIT_IBM_TOKEN: ${QISKIT_IBM_TOKEN:-}
   extra_hosts: ["host.docker.internal:host-gateway"]  # reach a model server on the host (Linux; built in on Docker Desktop)
   volumes:
     - aegisq-data:/var/lib/aegisq/workspace
@@ -87,13 +86,17 @@ services:
     restart: unless-stopped
     ports: ["127.0.0.1:2222:22"]
 
-  ssh-legacy:            # same server, classical key exchange only
+  ssh-legacy:            # same server, classical key exchange only; the agent may fix its KexAlgorithms
     image: aegisq-demo/sshd:latest   # built locally by ssh-pq; never pulled from a registry
     pull_policy: never
     container_name: aegisq-ssh-legacy
     restart: unless-stopped
-    depends_on: [ssh-pq]
-    command: ["/usr/sbin/sshd", "-D", "-e", "-o", "KexAlgorithms=curve25519-sha256,diffie-hellman-group14-sha1"]
+    depends_on:
+      ssh-pq: { condition: service_started }
+      setup: { condition: service_completed_successfully }
+    command: ["/usr/sbin/sshd", "-D", "-e", "-f", "/etc/ssh/aegisq/sshd_config"]
+    volumes:
+      - ./fleet/ssh-legacy/sshd:/etc/ssh/aegisq      # mount the directory: atomic config swaps stay visible
     ports: ["127.0.0.1:2223:22"]
 
   # ------------------------------------------------------------------ AegisQ itself
@@ -114,7 +117,7 @@ services:
   tests:                 # docker compose -f demo/docker-compose.yml --profile test run --rm tests [-m integration]
     <<: *aegisq
     profiles: ["test"]
-    build: { context: .., target: test, args: { EXTRAS: "agent,quantum" } }
+    build: { context: .., target: test, args: { EXTRAS: "agent" } }
     image: aegisq:test
     container_name: aegisq-tests
     entrypoint: ["python3", "-m", "pytest"]

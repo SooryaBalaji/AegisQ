@@ -10,9 +10,10 @@ export default defineConfig({
     emptyOutDir: false,
     copyPublicDir: false,
     sourcemap: false,
+    cssCodeSplit: false,
     rollupOptions: {
       input: fileURLToPath(new URL("./src/main.jsx", import.meta.url)),
-      output: { format: "iife", entryFileNames: "app.js", inlineDynamicImports: true },
+      output: { format: "iife", entryFileNames: "app.js", assetFileNames: "ui.css", inlineDynamicImports: true },
     },
   },
 });

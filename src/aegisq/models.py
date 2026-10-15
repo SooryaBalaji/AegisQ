@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import datetime as dt
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Any, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aegisq.netutil import validate_host, validate_port
 
@@ -59,6 +59,121 @@ class ManagedNginx(BaseModel):
         return v
 
 
+class ManagedSSHD(BaseModel):
+    """An OpenSSH server the agent may migrate. Only ``KexAlgorithms`` in ``config_path`` can change."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["sshd"] = "sshd"
+    config_path: str
+    test_cmd: list[str] | None = None  # default: sshd -t -f <config_path>
+    reload_cmd: list[str] = Field(default_factory=lambda: ["systemctl", "reload", "sshd"])
+    version_cmd: list[str] | None = Field(default_factory=lambda: ["sshd", "-V"])
+    command_timeout: float = Field(default=30.0, gt=0, le=600)
+
+    @model_validator(mode="after")
+    def _default_test(self) -> ManagedSSHD:
+        if self.test_cmd is None:
+            self.test_cmd = ["sshd", "-t", "-f", self.config_path]
+        return self
+
+    @field_validator("test_cmd", "reload_cmd")
+    @classmethod
+    def _non_empty(cls, v: list[str] | None) -> list[str] | None:
+        if v is not None and (not v or any(not isinstance(a, str) or a == "" for a in v)):
+            raise ValueError("command must be a non-empty argv list of non-empty strings")
+        return v
+
+
+TLS_SERVER_KINDS = ("nginx", "apache", "haproxy", "caddy", "postfix", "dovecot")
+MAIL_KINDS = ("postfix", "dovecot")
+
+
+def _default_commands(kind: str, path: str) -> dict[str, list[str]]:
+    caddy = ["--config", path, "--adapter", "caddyfile"]
+    return {
+        "apache": {
+            "test_cmd": ["apachectl", "configtest"],
+            "reload_cmd": ["apachectl", "graceful"],
+            "version_cmd": ["apachectl", "-V"],
+        },
+        "haproxy": {
+            "test_cmd": ["haproxy", "-c", "-f", path],
+            "reload_cmd": ["systemctl", "reload", "haproxy"],
+            "version_cmd": ["haproxy", "-vv"],
+        },
+        "caddy": {
+            "test_cmd": ["caddy", "validate", *caddy],
+            "reload_cmd": ["caddy", "reload", *caddy],
+            "version_cmd": ["caddy", "version"],
+        },
+        "postfix": {
+            "test_cmd": ["postfix", "check"],
+            "reload_cmd": ["postfix", "reload"],
+            "version_cmd": ["postconf", "-h", "mail_version"],
+        },
+        "dovecot": {
+            "test_cmd": ["doveconf", "-n"],
+            "reload_cmd": ["doveadm", "reload"],
+            "version_cmd": ["dovecot", "--version"],
+        },
+    }[kind]
+
+
+class ManagedServer(BaseModel):
+    """Apache, HAProxy, Caddy, Postfix or Dovecot. Only the key-exchange group list in ``config_path`` can change:
+    SSLOpenSSLConfCmd Groups, ssl-default-bind-curves, curves, tls_eecdh_auto_curves or ssl_curve_list."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["apache", "haproxy", "caddy", "postfix", "dovecot"]
+    config_path: str
+    test_cmd: list[str] | None = None
+    reload_cmd: list[str] | None = None
+    version_cmd: list[str] | None = None
+    health_url: str | None = None  # web servers only; mail servers are checked with a classical TLS handshake
+    tls_library: str | None = None  # the libssl the server loads, if AegisQ cannot find it with ldd
+    health_expect: list[int] = Field(default_factory=lambda: list(range(200, 400)))
+    command_timeout: float = Field(default=30.0, gt=0, le=600)
+
+    @model_validator(mode="after")
+    def _defaults(self) -> ManagedServer:
+        d = _default_commands(self.kind, self.config_path)
+        self.test_cmd = self.test_cmd or d["test_cmd"]
+        self.reload_cmd = self.reload_cmd or d["reload_cmd"]
+        if self.version_cmd is None:
+            self.version_cmd = d["version_cmd"]
+        if self.health_url and self.kind in MAIL_KINDS:
+            raise ValueError(f"health_url does not apply to {self.kind}")
+        return self
+
+    @field_validator("test_cmd", "reload_cmd")
+    @classmethod
+    def _non_empty(cls, v: list[str] | None) -> list[str] | None:
+        if v is not None and (not v or any(not isinstance(a, str) or a == "" for a in v)):
+            raise ValueError("command must be a non-empty argv list of non-empty strings")
+        return v
+
+
+Managed = Annotated[ManagedNginx | ManagedSSHD | ManagedServer, Field(discriminator="kind")]
+
+Platform = Literal[
+    "nginx",
+    "apache",
+    "haproxy",
+    "caddy",
+    "postfix",
+    "dovecot",
+    "openssh",
+    "lighttpd",
+    "envoy",
+    "windows",
+    "aws-elb",
+    "gcp-lb",
+]
+PLATFORMS: tuple[str, ...] = get_args(Platform)
+
+
 class ServiceTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -73,7 +188,27 @@ class ServiceTarget(BaseModel):
     retention_years: float | None = Field(default=None, ge=0, le=200)  # overrides X
     migration_years: float | None = Field(default=None, ge=0, le=50)  # overrides Y
     stack: dict[str, str] = Field(default_factory=dict)  # e.g. {"openssl": "3.0.11"}
-    managed: ManagedNginx | None = None
+    starttls: Literal["smtp", "imap", "pop3"] | None = None  # upgrade a plaintext mail session before TLS
+    platform: Platform | None = None  # what runs here, used for fix advice when AegisQ does not manage it
+    managed: Managed | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _managed_kind(cls, data: Any) -> Any:
+        if isinstance(data, dict) and isinstance(data.get("managed"), dict) and "kind" not in data["managed"]:
+            ssh = str(data.get("protocol", "tls")).lower() == "ssh"
+            data = {**data, "managed": {**data["managed"], "kind": "sshd" if ssh else "nginx"}}
+        return data
+
+    @model_validator(mode="after")
+    def _managed_matches_protocol(self) -> ServiceTarget:
+        if self.managed is not None:
+            ssh = self.protocol == Protocol.SSH
+            if (self.managed.kind == "sshd") != ssh:
+                raise ValueError(f"managed.kind {self.managed.kind!r} does not match protocol {self.protocol.value!r}")
+        if self.starttls and self.protocol != Protocol.TLS:
+            raise ValueError("starttls only applies to TLS services")
+        return self
 
     @field_validator("host")
     @classmethod

@@ -61,18 +61,6 @@ No migration actions recorded yet.
 `{{ cbom.file }}`: CycloneDX {{ cbom.spec }}, {{ cbom.components }} cryptographic assets, schema validation **{{ "passed" if cbom.valid else "FAILED" }}**.
 {% endif %}
 
-{% if realworld %}
-## Real-world adoption gap (Tranco)
-
-| Group | Sites | Reachable | PQ ready | Share |
-|---|---|---|---|---|
-{% for g in realworld.groups %}
-| {{ g.label }} | {{ g.sites }} | {{ g.reachable }} | {{ g.pq_ready }} | {{ g.pq_pct }}% |
-{% endfor %}
-
-Tranco list {{ realworld.list_id }}; scan took {{ realworld.duration_s }} s.
-{% endif %}
-
 {% if benchmark %}
 ## Handshake cost (measured)
 
@@ -83,13 +71,6 @@ Tranco list {{ realworld.list_id }}; scan took {{ realworld.duration_s }} s.
 {% endfor %}
 
 {{ benchmark.caveat }}
-{% endif %}
-
-{% if entropy %}
-## Quantum entropy
-
-Source: {{ entropy.source }}{% if entropy.job_id %}, IBM job `{{ entropy.job_id }}` on {{ entropy.backend }}{% endif %}{% if entropy.simulated %} (**SIMULATED: not quantum randomness**){% endif %}.
-Raw bits: {{ entropy.raw_bits }}; min-entropy bound h = {{ "%.4f"|format(entropy.h_min) }} per bit; extracted {{ entropy.extracted_bits }} bits at ε = 2^-{{ entropy.eps_bits }}.
 {% endif %}
 
 ## Where the Z assumption comes from

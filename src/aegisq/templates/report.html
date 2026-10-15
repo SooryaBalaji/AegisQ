@@ -64,26 +64,11 @@ code { font-size:13px; } ul { padding-left:20px; }
 {% if cbom.valid %}<span class="ok">passed</span>{% else %}<span class="bad">FAILED</span>{% endif %}.</p>
 {% endif %}
 
-{% if realworld %}
-<h2>Real-world adoption gap</h2>
-<div class="scroll"><table><tr><th>Group</th><th>Sites</th><th>Reachable</th><th>PQ ready</th><th>Share</th></tr>
-{% for g in realworld.groups %}<tr><td>{{ g.label }}</td><td>{{ g.sites }}</td><td>{{ g.reachable }}</td><td>{{ g.pq_ready }}</td><td>{{ g.pq_pct }}%</td></tr>{% endfor %}
-</table></div>
-<p class="muted">Tranco list {{ realworld.list_id }}; scan took {{ realworld.duration_s }} s.</p>
-{% endif %}
-
 {% if benchmark %}
 <h2>Handshake cost (measured)</h2>
 <div class="scroll"><table><tr><th>Setting</th><th>n</th><th>p50 ms</th><th>p99 ms</th><th>Failures</th></tr>
 {% for b in benchmark.results %}<tr><td>{{ b.label }}</td><td>{{ b.n }}</td><td>{{ b.p50_ms }}</td><td>{{ b.p99_ms }}</td><td>{{ b.failures }}</td></tr>{% endfor %}
 </table></div><p class="muted">{{ benchmark.caveat }}</p>
-{% endif %}
-
-{% if entropy %}
-<h2>Quantum entropy</h2>
-<p>Source: {{ entropy.source }}{% if entropy.job_id %}, IBM job <code>{{ entropy.job_id }}</code> on {{ entropy.backend }}{% endif %}
-{% if entropy.simulated %}<span class="bad">SIMULATED: not quantum randomness</span>{% endif %}.
-Raw bits {{ entropy.raw_bits }}; min-entropy h = {{ "%.4f"|format(entropy.h_min) }}; extracted {{ entropy.extracted_bits }} bits at ε = 2<sup>-{{ entropy.eps_bits }}</sup>.</p>
 {% endif %}
 
 <h2>Where the Z assumption comes from</h2>

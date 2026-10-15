@@ -31,7 +31,7 @@ COPY pyproject.toml README.md /src/
 COPY src /src/src
 COPY tests /src/tests
 COPY aegisq.example.yaml /src/
-RUN /opt/aegisq/bin/pip install -e "/src[dev,agent,quantum]"
+RUN /opt/aegisq/bin/pip install -e "/src[dev,agent]"
 WORKDIR /src
 ENTRYPOINT ["python3", "-m", "pytest"]
 CMD []

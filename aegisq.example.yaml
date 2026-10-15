@@ -2,7 +2,6 @@
 #   AEGISQ_API_TOKENS="alice:<token>,bob:<token>"   dashboard/API identities (>= 16 chars each)
 #   AEGISQ_AUDIT_KEY="<random>"                    HMAC key for the audit hash chain
 #   ANTHROPIC_API_KEY="<key>"                       enables the Claude planner
-#   QISKIT_IBM_TOKEN / QISKIT_IBM_INSTANCE          IBM Quantum hardware for the entropy module
 home: .aegisq
 
 risk:
@@ -38,6 +37,7 @@ agent:
   approval_timeout_s: 1800     # how long request_approval waits for a human
   approval_ttl_s: 3600         # an approval must be used within this time
   require_classical_fallback: true
+  separation_of_duties: true     # whoever starts a migration cannot approve its changes; false for one-person setups
   min_tls_version: TLSv1.2
   verify_attempts: 5
   verify_interval_s: 1

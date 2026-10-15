@@ -100,7 +100,7 @@ def test_rules_planner_migrates_and_verifies(ws, cfg, fake_nginx, verify_stub) -
         assert e in ev
     assert ws.audit.verify().ok
     assert (ws.home / "reports" / "migration-report.html").exists()
-    assert any("SSH is scan-only" in n for n in summary.notes["ssh"])
+    assert any("kind sshd" in n for n in summary.notes["ssh"])
     a = ws.approvals.list()[0]
     assert a.status == "consumed" and a.decided_by == "alice"
 

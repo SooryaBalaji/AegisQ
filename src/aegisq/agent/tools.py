@@ -2,10 +2,11 @@
 
 Rules enforced in code:
   * only services with a ``managed`` block can be touched; the model never sees or chooses file paths
-  * patches pass the guardrails (two directives, allowlisted values) at proposal AND at apply time
+  * patches pass the guardrails (only the key-exchange lines of each server; allowlisted values)
+    at proposal AND at apply time
   * apply requires a human approval that is approved, unexpired, unused and bound to the exact diff hash
   * apply refuses if the live config changed since the proposal (drift)
-  * the old config is backed up first and restored automatically if ``nginx -t`` or the reload fails
+  * the old config is backed up first and restored automatically if the server's config test or reload fails
   * only one change may be in flight: a patch must be verified or rolled back before the next is applied
   * anything still unverified when the agent stops is rolled back by ``finalize()``
 """
@@ -25,12 +26,13 @@ from typing import Any
 
 from aegisq.agent import diagnose as dg
 from aegisq.agent import guardrails as gr
-from aegisq.agent.health import http_health, pq_check
+from aegisq.agent import tlslib
+from aegisq.agent.health import http_health, pq_check, ssh_check, tls_health
 from aegisq.agent.patchstore import PatchStore
-from aegisq.agent.targets import NginxTarget, TargetUnavailable
+from aegisq.agent.targets import ConfigTarget, TargetUnavailable
 from aegisq.config import AegisQConfig
 from aegisq.filelock import FileLock, LockHeld
-from aegisq.models import ScanReport, ServiceScan, ServiceTarget, Status
+from aegisq.models import MAIL_KINDS, ScanReport, ServiceScan, ServiceTarget, Status
 from aegisq.risk import rank
 from aegisq.workspace import Approval, Workspace, atomic_write
 
@@ -88,8 +90,10 @@ class Toolbox:
         actor: str = "agent",
         approval_waiter: ApprovalWaiter | None = None,
         verify_timeout: float = 5.0,
+        initiator: str | None = None,
     ) -> None:
         self.ws = ws
+        self.initiator = initiator
         self.cfg = cfg
         self.report = report
         self.actor = actor
@@ -100,6 +104,7 @@ class Toolbox:
             allowed_groups=cfg.agent.allowed_groups,
             require_classical_fallback=cfg.agent.require_classical_fallback,
             min_tls_version=cfg.agent.min_tls_version,
+            allowed_ssh_kex=cfg.agent.allowed_ssh_kex,
         )
         self.patches = PatchStore(ws.home / "patches" / "repo.git")
         self.verify_timeout = verify_timeout
@@ -114,12 +119,27 @@ class Toolbox:
             raise ToolError(f"unknown service {name!r}; call list_services for valid names")
         return self.scans[name].service
 
-    def _target(self, name: str) -> NginxTarget:
+    def _target(self, name: str) -> ConfigTarget:
         svc = self._service(name)
         try:
-            return NginxTarget(svc)
+            return ConfigTarget(svc)
         except TargetUnavailable as e:
             raise ToolError(str(e)) from None
+
+    @staticmethod
+    def _dialect(t: ConfigTarget) -> gr.Dialect:
+        return gr.DIALECTS[t.kind]
+
+    def _openssh_version(self, service: str, t: ConfigTarget) -> str | None:
+        ver = None
+        if t.kind == "sshd":
+            v = t.version()
+            if v is not None:
+                ver = dg.openssh_version_from(v.output)
+            ssh = self.scans[service].ssh
+            if ver is None and ssh is not None:
+                ver = dg.openssh_version_from(ssh.software or ssh.banner or "")
+        return ".".join(map(str, ver)) if ver else None
 
     def _backup_dir(self, service: str) -> Path:
         d = self.ws.home / "backups" / service
@@ -188,6 +208,8 @@ class Toolbox:
                     "margin": r.margin,
                     "severity": r.severity,
                     "managed": svc.managed is not None,
+                    "kind": svc.managed.kind if svc.managed else None,
+                    "platform": svc.platform,
                     "outcome_this_run": self.state[r.service].outcome,
                 }
             )
@@ -200,13 +222,19 @@ class Toolbox:
         except TargetUnavailable as e:
             raise ToolError(str(e)) from None
         self._audit("config.read", service=service, sha256=gr.sha256_text(text))
-        return {
+        out: dict[str, Any] = {
             "service": service,
+            "kind": t.kind,
             "file": t.path.name,
             "sha256": gr.sha256_text(text),
-            "directives": gr.current_directives(text),
+            "directives": gr.current_directives(text, self._dialect(t)),
             "config": text,
         }
+        if t.kind == "sshd":
+            out["openssh_version"] = self._openssh_version(service, t)
+        elif t.kind != "nginx":
+            out["groups"] = gr.current_groups(text, self._dialect(t))
+        return out
 
     def propose_patch(
         self,
@@ -214,17 +242,50 @@ class Toolbox:
         diff: str | None = None,
         ssl_ecdh_curve: str | None = None,
         ssl_protocols: str | None = None,
+        kex_algorithms: str | None = None,
+        groups: str | None = None,
         rationale: str = "",
     ) -> dict[str, Any]:
         t = self._target(service)
         text = t.read_config()
         try:
             if not diff:
-                diff = gr.make_patch(text, t.path.name, ssl_ecdh_curve=ssl_ecdh_curve, ssl_protocols=ssl_protocols)
-            vp = gr.validate_patch(text, diff, self.policy)
+                if t.kind == "sshd":
+                    if ssl_ecdh_curve or ssl_protocols or groups or not kex_algorithms:
+                        raise gr.PatchRejected("this is an OpenSSH server: give kex_algorithms (and nothing else)")
+                    diff = gr.make_sshd_patch(text, t.path.name, kex_algorithms)
+                elif t.kind == "nginx":
+                    if kex_algorithms:
+                        raise gr.PatchRejected("kex_algorithms only applies to OpenSSH servers")
+                    if groups and not ssl_ecdh_curve:
+                        ssl_ecdh_curve = ":".join(_split_groups(groups))
+                    diff = gr.make_patch(text, t.path.name, ssl_ecdh_curve=ssl_ecdh_curve, ssl_protocols=ssl_protocols)
+                else:
+                    if kex_algorithms or ssl_protocols:
+                        raise gr.PatchRejected(f"this is a {t.kind} server: give groups (and nothing else)")
+                    wanted = groups or ssl_ecdh_curve
+                    if not wanted:
+                        raise gr.PatchRejected(f"this is a {t.kind} server: give groups, post-quantum hybrid first")
+                    diff = gr.make_groups_patch(text, t.path.name, t.kind, _split_groups(wanted))
+            vp = gr.validate_patch(text, diff, self.policy, self._dialect(t))
         except gr.PatchRejected as e:
             self._audit("patch.rejected_by_guardrail", service=service, reason=str(e), diff=diff)
             raise ToolError(f"guardrail rejected the patch: {e}") from None
+        if t.kind == "postfix":
+            ver = t.version()
+            gate = dg.server_too_old(t.kind, ver.output if ver and ver.ok else "")
+            if gate is not None:
+                self._audit("patch.refused_server_version", service=service, diagnosis=gate.to_dict())
+                self.state[service].outcome = "failed"
+                raise ToolError(f"{gate.root_cause} {gate.recommendation} Nothing was changed.") from None
+        if t.kind in tlslib.CANDIDATES:
+            lib = tlslib.check(t.kind, gr.current_groups(vp.new_text, self._dialect(t)), t.tls_library)
+            self._audit("tls_library.checked", service=service, library=lib.library, detail=lib.detail)
+            if lib.supported is False:
+                diag = dg.library_too_old(t.kind, lib.version)
+                self._learn_stack(service, diag.openssl_version)
+                self.state[service].outcome = "failed"
+                raise ToolError(f"{lib.detail}. {diag.root_cause} {diag.recommendation} Nothing was changed.") from None
         pid = uuid.uuid4().hex[:10]
         p = Proposal(
             id=pid,
@@ -265,9 +326,17 @@ class Toolbox:
             raise ToolError(f"unknown proposal {proposal_id!r}")
         if p.state != "proposed":
             raise ToolError(f"proposal {proposal_id} is {p.state}; propose a new patch")
-        summary = "; ".join(p.changes)
+        summary = "; ".join(c.rstrip(";") for c in p.changes)
         a = self.ws.approvals.create(
-            p.service, p.id, p.diff, p.diff_sha256, summary, self.actor, self.cfg.agent.approval_ttl_s
+            p.service,
+            p.id,
+            p.diff,
+            p.diff_sha256,
+            summary,
+            self.actor,
+            self.cfg.agent.approval_ttl_s,
+            initiated_by=self.initiator,
+            require_other=self.cfg.agent.separation_of_duties,
         )
         p.approval_id = a.id
         self._audit(
@@ -277,6 +346,7 @@ class Toolbox:
             approval_id=a.id,
             diff_sha256=p.diff_sha256,
             summary=summary,
+            initiated_by=self.initiator,
         )
         try:
             decided = self._waiter(a)
@@ -322,7 +392,7 @@ class Toolbox:
                 self._audit("patch.refused_drift", service=p.service, proposal_id=p.id)
                 raise ToolError("the live config changed since the proposal; read_config and propose again")
             try:  # defence in depth: the guardrails run again on the live file
-                vp = gr.validate_patch(current, p.diff, self.policy)
+                vp = gr.validate_patch(current, p.diff, self.policy, self._dialect(t))
             except gr.PatchRejected as e:
                 raise ToolError(f"guardrail rejected the patch at apply time: {e}") from None
             if vp.new_text != p.new_text or vp.diff_sha256 != p.diff_sha256:
@@ -346,8 +416,11 @@ class Toolbox:
                 t.write_config(current)
                 retest = t.test()
                 ver = t.version()
-                diag = dg.diagnose(test.output, ver.output if ver else "")
-                self._learn_stack(p.service, diag.openssl_version)
+                if t.kind == "sshd":
+                    diag = dg.diagnose_sshd(test.output, ver.output if ver else "")
+                else:
+                    diag = dg.diagnose(test.output, ver.output if ver else "", server=t.kind)
+                    self._learn_stack(p.service, diag.openssl_version)
                 p.state = "failed"
                 st = self.state[p.service]
                 st.outcome = "failed"
@@ -402,9 +475,14 @@ class Toolbox:
         pq_ok = health_ok = False
         pq_detail = health_detail = ""
         for i in range(attempts):
-            pq_ok, pq_detail = _run(pq_check(svc, self.verify_timeout))
-            h = _run(http_health(svc, self.verify_timeout))
-            health_ok, health_detail = h.ok, h.detail
+            if svc.protocol.value == "ssh":
+                pq_ok, health_ok, pq_detail = _run(ssh_check(svc, self.verify_timeout))
+                health_detail = "sshd answers new connections" if health_ok else pq_detail
+            else:
+                pq_ok, pq_detail = _run(pq_check(svc, self.verify_timeout))
+                mail = svc.starttls is not None or (svc.managed is not None and svc.managed.kind in MAIL_KINDS)
+                h = _run(tls_health(svc, self.verify_timeout) if mail else http_health(svc, self.verify_timeout))
+                health_ok, health_detail = h.ok, h.detail
             if pq_ok and health_ok:
                 break
             if i + 1 < attempts:
@@ -487,6 +565,12 @@ class Toolbox:
         if rolled:
             self._audit("agent.safety_rollback", services=rolled)
         return rolled
+
+
+def _split_groups(value: str) -> list[str]:
+    import re
+
+    return [g for g in re.split(r"[\s,:]+", value.strip()) if g]
 
 
 def _with_facts(scan: ServiceScan, facts: dict[str, dict[str, str]]) -> ServiceScan:

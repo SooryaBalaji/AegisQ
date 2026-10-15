@@ -1,5 +1,6 @@
 import { Fragment, useState } from "react";
 import { Badge, SEV, STATUS, fmt, marginOf, severity, why, years } from "./util.jsx";
+import LiveLattice from "./aq/LiveLattice.jsx";
 
 function Tile({ k, v, l }) {
   return <div className="tile"><div className="k">{k}</div><div className="v">{v}</div><div className="l">{l}</div></div>;
@@ -20,7 +21,7 @@ function Hero({ overview, z }) {
       "Every fix is proposed by the agent, approved by a named person, tested, verified, and rolled back if it fails.";
     tiles = (
       <>
-        <Tile k="Post-quantum ready" v={`${pct}%`} l={`${sm.pq_ready} of ${reachable} reachable services complete a hybrid ML-KEM handshake`} />
+        <Tile k="Post-quantum ready" v={`${pct}%`} l={`${sm.pq_ready} of ${reachable} reachable services complete a post-quantum hybrid handshake`} />
         <Tile k="At risk now" v={atRisk} l={`X + Y > Z at Z = ${z}`} />
         <Tile k="Scanned" v={sm.total} l="TLS and SSH services" />
         <Tile k="Classical or old TLS" v={sm.classical + sm.tls12_only + sm.legacy_tls} l="need a key-exchange upgrade" />
@@ -28,7 +29,9 @@ function Hero({ overview, z }) {
       </>
     );
   }
+  const nodes = scan ? overview.services.map((s) => ({ name: s.name, status: s.status })) : [];
   return (
+    <>
     <section className="hero" id="top" aria-labelledby="hero-title">
       <div className="hero-copy">
         <span className="eyebrow">Upgrade your key exchange</span>
@@ -39,8 +42,27 @@ function Hero({ overview, z }) {
           <a className="button pill-ghost" href="#approvals">Review approvals</a>
         </div>
       </div>
-      <div className="tiles" aria-label="Summary">{tiles}</div>
+      <div className="fleet-map">
+        <LiveLattice
+          nodes={nodes}
+          phase={scan ? 1 : 0}
+          focus={null}
+          sealed={false}
+          className="fleet-svg"
+          label={scan ? `Fleet map: ${nodes.length} services from the latest scan` : "No scan yet"}
+        />
+        {scan && (
+          <div className="fleet-legend" aria-hidden="true">
+            <span><i className="lg-pq" />PQ ready</span>
+            <span><i className="lg-cl" />Classical / TLS 1.2</span>
+            <span><i className="lg-bad" />Legacy / plaintext</span>
+            <span><i className="lg-un" />Unreachable</span>
+          </div>
+        )}
+      </div>
     </section>
+    <div className="tiles" aria-label="Summary">{tiles}</div>
+    </>
   );
 }
 
@@ -89,7 +111,7 @@ function ServerRow({ r, i }) {
   );
 }
 
-function Risk({ overview, z, setZ, client, onRescan }) {
+function Risk({ overview, z, setZ, client, onRescan, canRun }) {
   const scan = overview && overview.scan;
   const rows = (overview ? overview.services : []).map((r) => {
     const margin = marginOf(r, z);
@@ -105,8 +127,8 @@ function Risk({ overview, z, setZ, client, onRescan }) {
       <div className="row-between">
         <h2 id="mosca-title">Which servers are at risk?</h2>
         <div className="actions">
-          <button className="ghost" type="button" disabled={!canRescan} onClick={onRescan}
-            title={canRescan ? "" : "Start `aegisq serve --inventory FILE` to enable"}>Rescan fleet</button>
+          <button className="ghost" type="button" disabled={!canRescan || !canRun} onClick={onRescan}
+            title={!canRun ? "Your role cannot start scans" : canRescan ? "" : "Start `aegisq serve --inventory FILE` to enable"}>Rescan fleet</button>
           <a className="button ghost" href="#" onClick={(e) => { e.preventDefault(); client.download("/api/cbom", "cbom.json"); }}>Download CBOM</a>
         </div>
       </div>
@@ -145,7 +167,7 @@ function Risk({ overview, z, setZ, client, onRescan }) {
       </div>
       {scan
         ? <p className="muted small">Click a server to see why it got its risk.</p>
-        : <p className="muted">No scan yet: go to <a href="#run">Run</a>, enter some servers and click <em>Scan these servers</em>.</p>}
+        : <p className="muted">No scan yet: open <a href="#run">Run</a> and start a scan.</p>}
     </section>
   );
 }

@@ -23,9 +23,11 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from aegisq.agent import guardrails as gr
+from aegisq.agent.advice import advice_for
 from aegisq.agent.tools import Toolbox, ToolError
 from aegisq.config import AgentConfig
-from aegisq.crypto_registry import group_by_name
+from aegisq.crypto_registry import SSH_WEAK_KEX, group_by_name, ssh_kex_is_pq
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +50,8 @@ class ProposeInput(_In):
     service: str = Field(max_length=64)
     ssl_ecdh_curve: str | None = Field(default=None, max_length=200)
     ssl_protocols: str | None = Field(default=None, max_length=100)
+    kex_algorithms: str | None = Field(default=None, max_length=1000)
+    groups: str | None = Field(default=None, max_length=200)
     diff: str | None = Field(default=None, max_length=65536)
     rationale: str = Field(default="", max_length=2000)
 
@@ -75,19 +79,25 @@ TOOL_INPUTS: dict[str, type[_In]] = {
 TOOL_DESCRIPTIONS = {
     "list_services": "List every scanned service in risk-priority order (highest Mosca margin first), with its "
     "status, whether AegisQ manages its config, and what happened to it in this run.",
-    "read_config": "Return a managed service's nginx config (read-only), its sha256, and the current "
-    "ssl_ecdh_curve / ssl_protocols values.",
-    "propose_patch": "Record a minimal config change for a managed service and store it on a git branch. Give "
-    "either directive values (ssl_ecdh_curve, ssl_protocols; preferred) or a unified diff. Code rejects any change "
-    "outside those two directives, groups outside the allowlist, a list without a PQ hybrid first, a list without a "
-    "classical fallback, and any protocol other than TLSv1.2/TLSv1.3. Returns proposal_id and the diff.",
+    "read_config": "Return a managed service's config (read-only): its kind (nginx, apache, haproxy, caddy, postfix, "
+    "dovecot or sshd), sha256, the current key-exchange directives, the current TLS groups (apache, haproxy, caddy, "
+    "postfix, dovecot) or KexAlgorithms and openssh_version (sshd).",
+    "propose_patch": "Record a minimal config change for a managed service and store it on a git branch. For nginx "
+    "give ssl_ecdh_curve / ssl_protocols; for apache, haproxy, caddy, postfix and dovecot give groups (a list such as "
+    "'X25519MLKEM768:X25519:prime256v1'; AegisQ writes it in that server's syntax); for sshd give kex_algorithms; or "
+    "give a unified diff. Code rejects any change outside the key-exchange directives, values outside the allowlist, "
+    "a list without a PQ hybrid first, a list without a classical fallback, weak SSH key exchanges, any TLS protocol "
+    "other than TLSv1.2/TLSv1.3, and (apache, postfix, dovecot) a list the server's own TLS library cannot load. "
+    "Returns proposal_id and the diff.",
     "request_approval": "Show the proposal's diff to a human on the dashboard and block until they approve or "
     "reject it (or it times out). Returns the decision.",
-    "apply_patch": "Apply an approved proposal: back up the config, write the patch, run the config test "
-    "(nginx -t), and reload. If the test or reload fails the old config is restored automatically and a "
+    "apply_patch": "Apply an approved proposal: back up the config, write the patch, run the server's config test "
+    "(for example nginx -t, haproxy -c or sshd -t), and reload. If the test or reload fails the old config is "
+    "restored automatically and a "
     "diagnosis is returned. Refused without a recorded human approval for this exact diff.",
-    "verify": "Re-run the post-quantum handshake probe and an HTTP health check against the service. The service "
-    "is marked fixed only if both pass.",
+    "verify": "Re-run the post-quantum probe plus a health check (HTTP for web servers; a classical-only TLS "
+    "handshake for mail servers; a fresh SSH handshake for sshd). "
+    "The service is marked fixed only if both pass.",
     "rollback": "Restore the last known-good config for a service and reload. Always available.",
     "write_report": "Build the migration report from the audit log (read-only).",
 }
@@ -165,13 +175,54 @@ def _summarize(tb: Toolbox, planner: str, final: str, calls: int, rolled: list[s
 # ---------------------------------------------------------- rules planner ---
 
 
-def desired_groups(existing: list[str], allowed: list[str]) -> str:
+DEFAULT_SSH_CLASSICAL = (
+    "curve25519-sha256",
+    "curve25519-sha256@libssh.org",
+    "ecdh-sha2-nistp256",
+    "ecdh-sha2-nistp384",
+    "ecdh-sha2-nistp521",
+    "diffie-hellman-group-exchange-sha256",
+    "diffie-hellman-group16-sha512",
+    "diffie-hellman-group18-sha512",
+    "diffie-hellman-group14-sha256",
+)
+
+
+def desired_ssh_kex(existing: list[str], openssh_version: str | None, allowed: list[str]) -> str | None:
+    """The strongest PQ hybrid this OpenSSH supports first, then the classical methods already configured."""
+    try:
+        v = tuple(int(x) for x in openssh_version.split(".")[:2]) if openssh_version else None
+    except ValueError:
+        v = None
+    pq = []
+    if v is None or v >= (9, 9):
+        pq.append("mlkem768x25519-sha256")
+    if v is None or v >= (8, 5):
+        pq.append("sntrup761x25519-sha512@openssh.com")
+    pq = [k for k in pq if k in allowed]
+    if not pq:
+        return None
+    classical: list[str] = []
+    for value in existing:
+        if value[:1] in ("+", "-", "^"):
+            continue
+        for k in value.split(","):
+            if k and not ssh_kex_is_pq(k) and k in allowed and k not in SSH_WEAK_KEX and k not in classical:
+                classical.append(k)
+    if not classical:
+        classical = [k for k in DEFAULT_SSH_CLASSICAL if k in allowed]
+    return ",".join(pq + classical)
+
+
+def desired_groups(existing: list[str], allowed: list[str], kind: str = "nginx") -> str:
     """X25519MLKEM768 first, then the classical groups already configured (X25519 guaranteed)."""
     allowed_l = {a.lower() for a in allowed}
     out = ["X25519MLKEM768"]
     for value in existing:
-        for g in value.split(":"):
+        for g in re.split(r"[\s,:]+", value):
             info = group_by_name(g)
+            if kind == "caddy" and g.lower() not in gr.CADDY_NAMES:
+                continue
             if g and info and not info.pq and g.lower() in allowed_l and g.lower() not in {o.lower() for o in out}:
                 out.append(g)
     if not any(o.lower() == "x25519" for o in out):
@@ -194,7 +245,7 @@ class RulesPlanner:
                 if row["status"] == "pq_ready":
                     continue
                 if not row["managed"]:
-                    tb.note(name, _unmanaged_advice(row))
+                    tb.note(name, advice_for(row.get("platform"), row["protocol"]))
                     tb.state[name].outcome = "skipped"
                     continue
                 if row["status"] in ("unreachable", "error", "plaintext", "legacy_tls"):
@@ -226,6 +277,42 @@ class RulesPlanner:
 
         try:
             cfg = call("read_config", service=name)
+            if cfg.get("kind") == "sshd":
+                kex = desired_ssh_kex(
+                    cfg["directives"]["KexAlgorithms"], cfg.get("openssh_version"), tb.policy.allowed_ssh_kex
+                )
+                if kex is None:
+                    tb.note(
+                        name,
+                        f"OpenSSH {cfg.get('openssh_version') or '?'} has no post-quantum key exchange: "
+                        "upgrade to OpenSSH 9.9+",
+                    )
+                    tb.state[name].outcome = "skipped"
+                    return calls
+                prop = call(
+                    "propose_patch",
+                    service=name,
+                    kex_algorithms=kex,
+                    rationale=f"Rank {row['rank']} (margin {row['margin']:+.1f} y): prefer a hybrid post-quantum SSH "
+                    f"key exchange on OpenSSH {cfg.get('openssh_version') or '(unknown version)'}, keeping classical "
+                    "methods for older clients.",
+                )
+                self._approve_apply_verify(tb, name, prop, call)
+                return calls
+            if cfg.get("kind") != "nginx":
+                if row["status"] == "tls12_only":
+                    tb.note(name, "TLS 1.3 is off: hybrid key exchange needs TLS 1.3, so enable it first")
+                    tb.state[name].outcome = "skipped"
+                    return calls
+                prop = call(
+                    "propose_patch",
+                    service=name,
+                    groups=desired_groups(cfg.get("groups", []), tb.policy.allowed_groups, cfg["kind"]),
+                    rationale=f"Rank {row['rank']} (margin {row['margin']:+.1f} y): prefer hybrid ML-KEM key exchange "
+                    f"on {cfg['kind']}, keeping classical groups for older clients.",
+                )
+                self._approve_apply_verify(tb, name, prop, call)
+                return calls
             directives = cfg["directives"]
             curve = desired_groups(directives["ssl_ecdh_curve"], tb.policy.allowed_groups)
             protocols = None
@@ -239,49 +326,50 @@ class RulesPlanner:
                 rationale=f"Rank {row['rank']} (margin {row['margin']:+.1f} y): enable hybrid ML-KEM key exchange "
                 "with a classical fallback for older clients.",
             )
-            decision = call("request_approval", proposal_id=prop["proposal_id"])
-            if decision["status"] != "approved":
-                return calls
-            applied = call("apply_patch", proposal_id=prop["proposal_id"])
-            if not applied.get("applied"):
-                diag = applied.get("diagnosis") or {}
-                if diag:
-                    tb.note(name, f"recommendation: {diag.get('recommendation')}")
-                return calls
-            v = call("verify", service=name)
-            if not v["fixed"]:
-                call("rollback", service=name, reason="verification failed")
+            self._approve_apply_verify(tb, name, prop, call)
         except ToolError as e:
             tb.note(name, f"stopped: {e}")
             if not tb.state[name].outcome:
                 tb.state[name].outcome = "failed"
         return calls
 
-
-def _unmanaged_advice(row: dict[str, Any]) -> str:
-    if row["protocol"] == "ssh":
-        return (
-            "SSH is scan-only: upgrade to OpenSSH 9.9+ (mlkem768x25519-sha256 is the default from 10.0) or add "
-            "'KexAlgorithms mlkem768x25519-sha256,sntrup761x25519-sha512@openssh.com,curve25519-sha256' to sshd_config."
-        )
-    return "not managed by AegisQ: hand the CBOM entry to the owning team"
+    @staticmethod
+    def _approve_apply_verify(
+        tb: Toolbox, name: str, prop: dict[str, Any], call: Callable[..., dict[str, Any]]
+    ) -> None:
+        decision = call("request_approval", proposal_id=prop["proposal_id"])
+        if decision["status"] != "approved":
+            return
+        applied = call("apply_patch", proposal_id=prop["proposal_id"])
+        if not applied.get("applied"):
+            diag = applied.get("diagnosis") or {}
+            if diag:
+                tb.note(name, f"recommendation: {diag.get('recommendation')}")
+            return
+        v = call("verify", service=name)
+        if not v["fixed"]:
+            call("rollback", service=name, reason="verification failed")
 
 
 # --------------------------------------------------------- Claude planner ---
 
-SYSTEM_PROMPT = """You are AegisQ's migration agent. You move a fleet of TLS servers to hybrid \
-post-quantum key exchange (X25519MLKEM768) to stop "harvest now, decrypt later" attacks.
+SYSTEM_PROMPT = """You are AegisQ's migration agent. You move a fleet of TLS and SSH servers (web, proxy, mail and \
+SSH) to hybrid post-quantum key exchange (X25519MLKEM768 for TLS, mlkem768x25519-sha256 or sntrup761x25519 for SSH) \
+to stop "harvest now, decrypt later" attacks.
 
 Work the fleet in the order list_services returns (highest risk first). For each managed service that is not \
 already pq_ready:
-1. read_config, then propose_patch with the smallest change: set ssl_ecdh_curve to X25519MLKEM768 first, then the \
-classical groups it already uses (keep X25519 so older clients still connect). Only touch ssl_protocols if TLSv1.3 \
-is missing.
+1. read_config, then propose_patch with the smallest change. nginx: set ssl_ecdh_curve to X25519MLKEM768 first, \
+then the classical groups it already uses (keep X25519 so older clients still connect); only touch ssl_protocols if \
+TLSv1.3 is missing. apache, haproxy, caddy, postfix, dovecot: give groups with X25519MLKEM768 first, then the \
+classical groups read_config reports (keep X25519). sshd: set kex_algorithms to mlkem768x25519-sha256 \
+(OpenSSH 9.9+) and/or sntrup761x25519-sha512@openssh.com (OpenSSH 8.5+) first, then the classical methods it already \
+uses (keep curve25519-sha256); read_config reports openssh_version. OpenSSH older than 8.5 cannot be fixed by config.
 2. request_approval and wait. If the human rejects it, note it and move on.
 3. apply_patch. If the config test fails, the old config is already restored; read the diagnosis, explain the \
 root cause, and move on. Do not retry a patch the TLS library cannot support.
 4. verify. If verification fails, call rollback.
-Skip services that are not managed, unreachable, plaintext or SSH; mention what their owners should do.
+Skip services that are not managed, unreachable or plaintext; mention what their owners should do.
 
 Rules are enforced by the tools, so a refused call means the action is not allowed: do not try to work around it. \
 Never apply anything without an approval. When every service has been handled, call write_report, then reply with \
