@@ -48,7 +48,7 @@ class Decision(BaseModel):
     reason: str | None = Field(default=None, max_length=2000)
 
 
-# ------------------------------------------------------------ job requests ---
+#job requests
 # Every field is an enum, a bounded number or a validated string: the dashboard can only start the
 # CLI commands below, with these options, as argv lists.
 
@@ -171,7 +171,7 @@ def create_app(
         limiter.fail(client)
         raise HTTPException(401, "missing or invalid bearer token", headers={"WWW-Authenticate": "Bearer"})
 
-    # -------------------------------------------------------------- pages
+    # pages
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok", "version": __version__}
@@ -195,7 +195,7 @@ def create_app(
             return Response(data, media_type=_STATIC[name], headers={"Cache-Control": "public, max-age=604800"})
         return Response(_static_text(name), media_type=_STATIC[name])
 
-    # ---------------------------------------------------------------- API
+    # API
     @app.get("/api/me")
     def me(who: str = Depends(identity)) -> dict[str, str]:
         return {"identity": who}
@@ -322,7 +322,7 @@ def create_app(
         validate_cbom(bom)
         return JSONResponse(bom, headers={"Content-Disposition": 'attachment; filename="cbom.json"'})
 
-    # ----------------------------------------------------------------- jobs
+    #  jobs
     def _inventory_targets() -> list[Any]:
         from aegisq.inventory import InventoryError, load_inventory
 
