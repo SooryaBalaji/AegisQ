@@ -1,0 +1,63 @@
+{
+  "scan_id": "3db247610fe949609c4325ec2987b7e0",
+  "started_at": "2026-10-04T02:47:22.867301Z",
+  "finished_at": "2026-10-04T02:47:24.956951Z",
+  "tool_version": "1.0.0",
+  "backend": "tls=native,ssh=native",
+  "results": [
+    {
+      "service": {
+        "name": "127.0.0.1-844",
+        "host": "127.0.0.1",
+        "port": 844,
+        "protocol": "tls",
+        "sni": null,
+        "data_category": "unknown",
+        "owner": null,
+        "tags": [],
+        "retention_years": null,
+        "migration_years": null,
+        "stack": {},
+        "managed": null
+      },
+      "status": "unreachable",
+      "backend": "native",
+      "scanned_at": "2026-10-04T02:47:24.955497Z",
+      "duration_ms": 2088.97,
+      "resolved_ip": "127.0.0.1",
+      "tls": {
+        "pq_ready": null,
+        "pq_group": null,
+        "pq_probe": {
+          "outcome": "unreachable",
+          "version": null,
+          "group": null,
+          "cipher_suite": null,
+          "hello_retry": false,
+          "alert": null,
+          "detail": "ConnectionRefusedError: [WinError 1225] The remote computer refused the network connection",
+          "client_hello_bytes": 1413,
+          "client_key_share_bytes": 1216,
+          "server_key_share_bytes": null,
+          "elapsed_ms": 2059.08
+        },
+        "modern_probe": null,
+        "tls12_probe": null,
+        "supports": {},
+        "tls12_key_exchange": null,
+        "certificate": null,
+        "plaintext_http": false,
+        "http_server": null
+      },
+      "ssh": null,
+      "errors": [
+        "ConnectionRefusedError: [WinError 1225] The remote computer refused the network connection"
+      ],
+      "findings": []
+    }
+  ],
+  "environment": {
+    "python": "3.11.9",
+    "platform": "Windows-10"
+  }
+}

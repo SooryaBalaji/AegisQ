@@ -1,4 +1,4 @@
-"""--planner local: an open model (Gemma 4 on the Gemini API, Ollama, ...) drives the same guarded toolbox."""
+"""--planner gemma: Gemma 4 (Gemini API, or Ollama on this machine) drives the same guarded toolbox."""
 
 import json
 import threading
@@ -8,11 +8,12 @@ from typing import Any, ClassVar
 
 import pytest
 
+from aegisq.agent import runner as runner_mod
 from aegisq.agent.runner import (
     GEMINI_OPENAI_URL,
     OLLAMA_URL,
+    GemmaPlanner,
     LocalEndpoint,
-    LocalPlanner,
     RulesPlanner,
     _retry_delay,
     choose_planner,
@@ -28,8 +29,9 @@ ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "AEGISQ_LLM_BASE_URL", "AEGISQ_LLM_MO
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for k in (*ENV, "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+    for k in ENV:
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(runner_mod, "_ollama_models", lambda *a, **k: None)  # never depend on a local Ollama
 
 
 EP = LocalEndpoint("http://127.0.0.1:1/v1", "gemma-4-31b-it", None)
@@ -100,13 +102,13 @@ def test_local_planner_cannot_bypass_guardrails(ws, cfg, fake_nginx) -> None:
     ]
     model = ScriptedModel(turns)
     tb = toolbox(ws, cfg, fake_nginx, approval_waiter=approver(ws))
-    summary = LocalPlanner(EP, post=model).run(tb)
+    summary = GemmaPlanner(EP, post=model).run(tb)
 
     assert "guardrail" in model.tool_result(4, "c3")["error"]
     assert "unknown proposal" in model.tool_result(4, "c4")["error"]
     assert summary.outcomes["web"] == "fixed"
     assert summary.final_message == "web: fixed."
-    assert summary.planner == "local" and summary.tool_calls == 9
+    assert summary.planner == "gemma" and summary.tool_calls == 9
     conf = Path(fake_nginx["conf"]).read_text()
     assert "X25519MLKEM768:X25519" in conf and "include" not in conf
 
@@ -121,7 +123,7 @@ def test_local_planner_cannot_bypass_guardrails(ws, cfg, fake_nginx) -> None:
     assert not any("<thought>" in str(m.get("content")) for m in model.bodies[-1]["messages"])
     assert events(ws).count("agent.tool_call") == 9
     started = next(e for e in ws.audit.entries() if e["event"] == "agent.started")
-    assert started["data"]["planner"] == "local" and started["data"]["model"] == "gemma-4-31b-it"
+    assert started["data"]["planner"] == "gemma" and started["data"]["model"] == "gemma-4-31b-it"
 
 
 @pytest.mark.usefixtures("_verify_stub")
@@ -132,7 +134,7 @@ def test_local_planner_scope_bad_args_and_refusal(ws, cfg, fake_nginx) -> None:
         reply(finish="content_filter"),
     ]
     model = ScriptedModel(turns)
-    summary = LocalPlanner(EP, post=model).run(toolbox(ws, cfg, fake_nginx), only=["web"])
+    summary = GemmaPlanner(EP, post=model).run(toolbox(ws, cfg, fake_nginx), only=["web"])
     assert "outside the scope" in model.tool_result(1, "c1")["error"]
     assert "JSON object" in model.tool_result(1, "c2")["error"]
     assert "JSON object" in model.tool_result(2, "c3")["error"]
@@ -159,7 +161,7 @@ def test_local_planner_safety_net_on_endpoint_failure(ws, cfg, fake_nginx) -> No
         boom,
     ]
     before = Path(fake_nginx["conf"]).read_text()
-    summary = LocalPlanner(EP, post=ScriptedModel(turns)).run(
+    summary = GemmaPlanner(EP, post=ScriptedModel(turns)).run(
         toolbox(ws, cfg, fake_nginx, approval_waiter=approver(ws))
     )
     assert "endpoint failed" in summary.final_message and "503" in summary.final_message
@@ -171,11 +173,11 @@ def test_local_planner_safety_net_on_endpoint_failure(ws, cfg, fake_nginx) -> No
 @pytest.mark.usefixtures("_verify_stub")
 def test_local_planner_turn_limit_length_and_malformed(ws, cfg, fake_nginx) -> None:
     model = ScriptedModel([reply(call(i, "list_services")) for i in range(5)])
-    summary = LocalPlanner(EP, max_turns=3, post=model).run(toolbox(ws, cfg, fake_nginx))
+    summary = GemmaPlanner(EP, max_turns=3, post=model).run(toolbox(ws, cfg, fake_nginx))
     assert "Stopped after 3 turns" in summary.final_message
 
     model = ScriptedModel([reply(call(1, "list_services")), reply(text="partial", finish="length"), {"oops": 1}])
-    summary = LocalPlanner(EP, post=model).run(toolbox(ws, cfg, fake_nginx))
+    summary = GemmaPlanner(EP, post=model).run(toolbox(ws, cfg, fake_nginx))
     assert model.bodies[2]["messages"][-1] == {"role": "user", "content": "Continue."}
     assert "unexpected response" in summary.final_message
 
@@ -186,12 +188,12 @@ def test_local_planner_turn_limit_length_and_malformed(ws, cfg, fake_nginx) -> N
 def test_resolve_endpoint_defaults_and_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = AgentConfig()
     ep = resolve_local_endpoint(cfg)
-    assert (ep.base_url, ep.model, ep.api_key) == (OLLAMA_URL, "gemma-4-31b-it", None)
+    assert (ep.base_url, ep.model, ep.api_key) == (OLLAMA_URL, "gemma4:e4b", None)
 
     monkeypatch.setenv("GEMINI_API_KEY", "g-key")
     ep = resolve_local_endpoint(cfg)
     assert ep.base_url == GEMINI_OPENAI_URL and ep.api_key == "g-key"
-    assert ep.label == "gemma-4-31b-it @ generativelanguage.googleapis.com"
+    assert ep.label == "gemma-4-31b-it @ generativelanguage.googleapis.com (native API)" and ep.api == "native"
 
     monkeypatch.setenv("AEGISQ_LLM_BASE_URL", "http://localhost:1234/v1/")
     monkeypatch.setenv("AEGISQ_LLM_MODEL", "gemma4:27b")
@@ -210,7 +212,7 @@ def test_resolve_endpoint_defaults_and_overrides(monkeypatch: pytest.MonkeyPatch
 
 
 def test_resolve_endpoint_gemini_needs_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg = AgentConfig(local_base_url=GEMINI_OPENAI_URL)
+    cfg = AgentConfig(base_url=GEMINI_OPENAI_URL)
     with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
         resolve_local_endpoint(cfg)
     monkeypatch.setenv("GOOGLE_API_KEY", "alt")
@@ -222,10 +224,24 @@ def test_choose_planner_auto(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(choose_planner("auto", cfg), RulesPlanner)
     monkeypatch.setenv("GEMINI_API_KEY", "g")
     p = choose_planner("auto", cfg)
-    assert isinstance(p, LocalPlanner) and p.endpoint.base_url == GEMINI_OPENAI_URL
-    assert isinstance(choose_planner("local", cfg), LocalPlanner)
+    assert isinstance(p, GemmaPlanner) and p.endpoint.base_url == GEMINI_OPENAI_URL
+    assert isinstance(choose_planner("gemma", cfg), GemmaPlanner)
     with pytest.raises(ValueError):
         choose_planner("nope", cfg)
+
+
+def test_gemma_on_this_machine_through_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
+    from aegisq.agent.runner import gemma_status
+
+    cfg = AgentConfig()
+    assert gemma_status(cfg) == (False, "set GEMINI_API_KEY, or install Ollama and run `ollama pull gemma4:e4b`")
+    monkeypatch.setattr(runner_mod, "_ollama_models", lambda *a, **k: ["llama3:8b"])
+    ok, detail = gemma_status(cfg)
+    assert not ok and "ollama pull gemma4" in detail
+    monkeypatch.setattr(runner_mod, "_ollama_models", lambda *a, **k: ["gemma4:e4b"])
+    assert gemma_status(cfg) == (True, "gemma4:e4b on this machine (Ollama)")
+    p = choose_planner("auto", cfg)
+    assert isinstance(p, GemmaPlanner) and (p.endpoint.base_url, p.endpoint.model) == (OLLAMA_URL, "gemma4:e4b")
 
 
 # ------------------------------------------------------------ real HTTP path ---
@@ -270,7 +286,7 @@ def test_http_post_retries_and_auth(chat_server) -> None:
         (200, {}, reply(text="ok")),
         (400, {}, {"error": {"message": "bad model name"}}),
     ]
-    planner = LocalPlanner(LocalEndpoint(url, "m", "secret"), timeout=5)
+    planner = GemmaPlanner(LocalEndpoint(url, "m", "secret"), timeout=5)
     out = planner._create([{"role": "user", "content": "hi"}])
     assert out["choices"][0]["message"]["content"] == "ok"
     path, body, auth = handler.seen[0]
@@ -278,6 +294,19 @@ def test_http_post_retries_and_auth(chat_server) -> None:
     assert body["model"] == "m" and body["tool_choice"] == "auto"
     with pytest.raises(RuntimeError, match="HTTP 400.*bad model name"):
         planner._create([])
+    assert len(handler.seen) == 3
+
+
+def test_endpoint_without_a_system_role(chat_server) -> None:
+    url, handler = chat_server
+    refusal = {"error": {"code": 400, "message": "Developer instruction is not enabled for models/gemma"}}
+    handler.script = [(400, {}, refusal), (200, {}, reply(text="ok")), (200, {}, reply(text="again"))]
+    planner = GemmaPlanner(LocalEndpoint(url, "m", None), timeout=5, retries=0)
+    msgs = [{"role": "system", "content": "RULES"}, {"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+    assert planner._post({"model": "m", "messages": msgs})["choices"][0]["message"]["content"] == "ok"
+    assert planner._post({"model": "m", "messages": msgs})["choices"][0]["message"]["content"] == "again"
+    folded = [b["messages"] for _, b, _ in handler.seen[1:]]
+    assert all(m[0]["role"] == "user" and m[0]["content"][0]["text"] == "RULES" for m in folded)
     assert len(handler.seen) == 3
 
 
@@ -292,6 +321,6 @@ def test_retry_delay_hints() -> None:
 
 
 def test_http_post_unreachable() -> None:
-    planner = LocalPlanner(LocalEndpoint("http://127.0.0.1:9/v1", "m", None), timeout=2, retries=0)
+    planner = GemmaPlanner(LocalEndpoint("http://127.0.0.1:9/v1", "m", None), timeout=2, retries=0)
     with pytest.raises(RuntimeError, match="cannot reach"):
         planner._create([])

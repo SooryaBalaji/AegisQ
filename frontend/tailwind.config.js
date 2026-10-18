@@ -1,5 +1,5 @@
 export default {
-  content: ["./src/aq/**/*.jsx"],
+  content: ["./src/home/Handshake.jsx", "./src/home/Landing.jsx"],
   important: "#aq",
   corePlugins: { preflight: false },
   theme: {

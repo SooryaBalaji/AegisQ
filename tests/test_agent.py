@@ -3,14 +3,13 @@ import json
 import os
 import threading
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from aegisq.agent import tools as tools_mod
 from aegisq.agent.health import HealthResult
-from aegisq.agent.runner import ClaudePlanner, RulesPlanner, desired_groups, dispatch, tool_specs
+from aegisq.agent.runner import RulesPlanner, desired_groups, dispatch, tool_specs
 from aegisq.agent.tools import Toolbox, ToolError
 from aegisq.config import AegisQConfig
 from aegisq.models import ManagedNginx, Protocol, ScanReport, ServiceScan, ServiceTarget, Status
@@ -303,115 +302,6 @@ def test_desired_groups() -> None:
     assert desired_groups(["prime256v1"], allowed) == "X25519MLKEM768:X25519:prime256v1"
     assert desired_groups([], allowed) == "X25519MLKEM768:X25519"
     assert desired_groups(["X25519MLKEM768:X25519"], allowed) == "X25519MLKEM768:X25519"
-
-
-# ------------------------------------------------------- Claude planner ---
-
-
-class ScriptedClaude:
-    """Plays back a fixed sequence of assistant turns and records what AegisQ sent."""
-
-    def __init__(self, turns: list[list[dict[str, Any]]]) -> None:
-        self.turns = turns
-        self.requests: list[dict[str, Any]] = []
-        self.messages = self
-
-    def create(self, **kw: Any) -> Any:
-        self.requests.append({**kw, "messages": list(kw["messages"])})
-        blocks = self.turns[len(self.requests) - 1]
-        content = [SimpleNamespace(**b) for b in blocks]
-        stop = "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
-        if blocks and blocks[0].get("type") == "refusal":
-            return SimpleNamespace(content=[], stop_reason="refusal", stop_details={"category": "cyber"})
-        return SimpleNamespace(content=content, stop_reason=stop)
-
-
-def tu(i: int, name: str, **inp: Any) -> dict[str, Any]:
-    return {"type": "tool_use", "id": f"t{i}", "name": name, "input": inp}
-
-
-def last_results(client: ScriptedClaude, n: int) -> list[dict[str, Any]]:
-    msgs = client.requests[n]["messages"]
-    return msgs[-1]["content"]
-
-
-def test_claude_planner_cannot_bypass_guardrails(ws, cfg, fake_nginx, verify_stub) -> None:
-    turns = [
-        [tu(1, "list_services")],
-        [tu(2, "read_config", service="web")],
-        # a misbehaving model: rewrite other directives, then try to apply without approval
-        [
-            tu(
-                3,
-                "propose_patch",
-                service="web",
-                diff="@@ -8 +8 @@\n-    ssl_ecdh_curve X25519:prime256v1;  # set by "
-                "platform team\n+    ssl_ecdh_curve X25519MLKEM768:X25519; include /etc/passwd;\n",
-            )
-        ],
-        [tu(4, "apply_patch", proposal_id="whatever")],
-        [tu(5, "propose_patch", service="web", ssl_ecdh_curve="X25519MLKEM768:X25519", rationale="hybrid first")],
-        [{"type": "text", "text": "waiting"}, tu(6, "request_approval", proposal_id="__PID__")],
-        [tu(7, "apply_patch", proposal_id="__PID__")],
-        [tu(8, "verify", service="web")],
-        [tu(9, "write_report")],
-        [{"type": "text", "text": "web: fixed."}],
-    ]
-    client = ScriptedClaude(turns)
-    orig_create = client.create
-
-    def create(**kw: Any) -> Any:
-        # substitute the real proposal id the toolbox returned
-        for msg in kw["messages"]:
-            if msg["role"] == "user" and isinstance(msg["content"], list):
-                for r in msg["content"]:
-                    if r.get("tool_use_id") == "t5" and not r["is_error"]:
-                        pid = json.loads(r["content"])["proposal_id"]
-                        for turn in client.turns:
-                            for b in turn:
-                                if b.get("input", {}).get("proposal_id") == "__PID__":
-                                    b["input"]["proposal_id"] = pid
-        return orig_create(**kw)
-
-    client.create = create  # type: ignore[method-assign]
-    planner = ClaudePlanner(model="claude-opus-5-5", client=client)
-    tb = toolbox(ws, cfg, fake_nginx, approval_waiter=approver(ws))
-    summary = planner.run(tb)
-
-    r3 = last_results(client, 3)[0]
-    assert r3["is_error"] and "guardrail" in r3["content"]
-    r4 = last_results(client, 4)[0]
-    assert r4["is_error"] and "unknown proposal" in r4["content"]
-    assert summary.outcomes["web"] == "fixed"
-    assert summary.final_message == "web: fixed."
-    req = client.requests[0]
-    assert req["model"] == "claude-opus-5-5" and req["thinking"] == {"type": "adaptive"}
-    assert req["extra_body"] == {"fallbacks": "default"}
-    assert "X25519MLKEM768:X25519" in Path(fake_nginx["conf"]).read_text()
-    assert "include" not in Path(fake_nginx["conf"]).read_text()
-    assert events(ws).count("agent.tool_call") == 9
-
-
-def test_claude_planner_scope_refusal_and_safety_net(ws, cfg, fake_nginx, verify_stub) -> None:
-    turns = [
-        [tu(1, "read_config", service="scanonly")],
-        [tu(2, "propose_patch", service="web", ssl_ecdh_curve="X25519MLKEM768:X25519")],
-        [{"type": "refusal"}],
-    ]
-    client = ScriptedClaude(turns)
-    planner = ClaudePlanner(model="m", client=client)
-    tb = toolbox(ws, cfg, fake_nginx, approval_waiter=approver(ws))
-    summary = planner.run(tb, only=["web"])
-    r1 = last_results(client, 1)[0]
-    assert r1["is_error"] and "outside the scope" in r1["content"]
-    assert "declined" in summary.final_message
-    assert "agent.refusal" in events(ws)
-
-
-def test_claude_planner_turn_limit(ws, cfg, fake_nginx, verify_stub) -> None:
-    client = ScriptedClaude([[tu(i, "list_services")] for i in range(5)])
-    summary = ClaudePlanner(model="m", max_turns=3, client=client).run(toolbox(ws, cfg, fake_nginx))
-    assert "Stopped after 3 turns" in summary.final_message
 
 
 def test_concurrent_lock(ws, cfg, fake_nginx, verify_stub) -> None:

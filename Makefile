@@ -6,7 +6,7 @@ install:
 	$(PY) -m pip install .
 
 dev:
-	$(PY) -m pip install -e ".[dev,agent]"
+	$(PY) -m pip install -e ".[dev]"
 
 lint:
 	ruff check src tests

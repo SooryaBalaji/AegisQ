@@ -1,0 +1,100 @@
+name: AegisQ post-quantum check
+description: Scan TLS, SSH and mail servers for post-quantum key exchange, rank the risk and publish a CycloneDX 1.6 CBOM. Read-only.
+author: SooryaBalaji
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  inventory:
+    description: Path to the AegisQ inventory file (YAML) listing the servers to check.
+    required: true
+  fail-on:
+    description: "Fail the job when a server is: none, classical (not post-quantum) or at-risk (Mosca margin > 0)."
+    required: false
+    default: at-risk
+  z-years:
+    description: Years until a cryptographically relevant quantum computer, for the risk ranking.
+    required: false
+    default: ""
+  python-version:
+    description: Python version to run AegisQ with.
+    required: false
+    default: "3.12"
+  artifact-name:
+    description: Name of the uploaded artifact (scan JSON, risk ranking and CBOM).
+    required: false
+    default: aegisq-pq-report
+
+outputs:
+  pq-ready:
+    description: Number of servers that completed a post-quantum handshake.
+    value: ${{ steps.summary.outputs.pq_ready }}
+  total:
+    description: Number of servers scanned.
+    value: ${{ steps.summary.outputs.total }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install AegisQ
+      shell: bash
+      run: python -m pip install --quiet "${{ github.action_path }}"
+
+    - name: Scan
+      id: scan
+      shell: bash
+      env:
+        AEGISQ_HOME: ${{ runner.temp }}/aegisq
+        INVENTORY: ${{ inputs.inventory }}
+        FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        mkdir -p aegisq-out
+        set +e
+        aegisq scan "$INVENTORY" --out aegisq-out/scan.json --fail-on "$FAIL_ON"
+        echo "code=$?" >> "$GITHUB_OUTPUT"
+        exit 0
+
+    - name: Risk ranking and CBOM
+      id: summary
+      shell: bash
+      env:
+        AEGISQ_HOME: ${{ runner.temp }}/aegisq
+        Z: ${{ inputs.z-years }}
+      run: |
+        aegisq risk --scan aegisq-out/scan.json ${Z:+--z "$Z"} --json > aegisq-out/risk.json
+        aegisq cbom --scan aegisq-out/scan.json --out aegisq-out/cbom.json
+        python - <<'EOF'
+        import json, os
+        scan = json.load(open("aegisq-out/scan.json"))
+        risk = {r["service"]: r for r in json.load(open("aegisq-out/risk.json"))}
+        rows = scan["results"]
+        ready = sum(1 for r in rows if r["status"] == "pq_ready")
+        with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"pq_ready={ready}\ntotal={len(rows)}\n")
+        lines = [f"### AegisQ: {ready} of {len(rows)} servers are post-quantum ready", "",
+                 "| Server | Endpoint | Status | Risk |", "|---|---|---|---|"]
+        for r in rows:
+            s = r["service"]
+            k = risk.get(s["name"], {})
+            lines.append(f"| {s['name']} | {s['host']}:{s['port']} | {r['status']} | {k.get('severity', '')} |")
+        lines += ["", "The CycloneDX 1.6 CBOM is in the workflow artifact."]
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+            f.write("\n".join(lines) + "\n")
+        EOF
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: aegisq-out/
+
+    - name: Apply the policy
+      if: steps.scan.outputs.code != '0'
+      shell: bash
+      run: |
+        echo "::error::AegisQ found servers that fail the '${{ inputs.fail-on }}' policy (see the job summary)."
+        exit "${{ steps.scan.outputs.code }}"

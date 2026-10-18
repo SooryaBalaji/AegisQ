@@ -14,7 +14,7 @@ This one command:
 2. generates the demo nginx configs and certificates;
 3. starts the 7 demo servers and the dashboard on http://localhost:8000.
 
-Sign in with the token `aegisq-demo-token-change-me`. To use your own token, put `AEGISQ_API_TOKENS=you:<at least 16 characters>` in a file called `demo/.env` before `up`.
+Sign in as `admin` with the password `aegisq-demo-change-me`. To choose your own, put `AEGISQ_ADMIN_USER=you` and `AEGISQ_ADMIN_PASSWORD=<at least 12 characters>` in a file called `demo/.env` before the first `up`.
 
 Run any `aegisq` command through Docker. This shorthand is used below; it's PowerShell syntax, so use the full command in other shells:
 ```powershell
@@ -44,7 +44,7 @@ docker compose -f demo/docker-compose.yml down -v     # stop and wipe the worksp
 ```
 Then delete `demo/fleet/` and run `up` again for pristine configs.
 
-For the Claude planner or the Gemma 4 planner, put `ANTHROPIC_API_KEY=...` or `GEMINI_API_KEY=...` in `demo/.env`.
+For the Gemma 4 planner on Google's Gemini API, put `GEMINI_API_KEY=...` in `demo/.env`. For Gemma 4 on your own computer, install Ollama, run `ollama pull gemma4:e4b`, and set `AEGISQ_LLM_BASE_URL=http://host.docker.internal:11434/v1` there instead.
 
 The AegisQ container mounts the Docker socket so the agent can run `nginx -t` / `sshd -t` and reload inside the demo containers. That gives it control of Docker on your machine, so keep this setup to the demo.
 
@@ -60,10 +60,10 @@ You need:
 ```bash
 git clone https://github.com/SooryaBalaji/QShield && cd QShield
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev,agent,quantum]"
+pip install -e ".[dev]"
 aegisq doctor
 ```
-`doctor` lists what is available. `ok` means ready; `--` means optional and not set up yet (for example no Anthropic key).
+`doctor` lists what is available. `ok` means ready; `--` means optional and not set up yet (for example no Gemini key).
 
 Start the demo fleet:
 
@@ -159,7 +159,7 @@ Two terminals, same `AEGISQ_HOME`.
 ```bash
 aegisq serve --inventory demo/fleet.yaml
 ```
-Copy the printed token, open http://127.0.0.1:8000 and sign in.
+Open http://127.0.0.1:8000 on the same computer and create the first admin when asked (or run `aegisq users add alice --role admin` first). With separation of duties on, also add an approver (`aegisq users add priya --role approver`) and approve as them, or set `agent.separation_of_duties: false` for a one-person test.
 
 **Terminal 2: the agent**
 ```bash
@@ -191,27 +191,19 @@ Variations:
 - **Approve from the CLI instead:** run `aegisq approvals list --status pending`, then `aegisq approve <ID> --by alice`.
 - **Approve in the terminal:** `aegisq migrate demo/fleet.yaml --approve-in terminal` shows each diff and asks y/N.
 - **Agent names are refused as approvers:** `aegisq approve <ID> --by agent` fails.
-- **Claude as the planner:**
-
-  ```bash
-  export ANTHROPIC_API_KEY=...
-  aegisq migrate demo/fleet.yaml --planner claude
-  ```
-  Same outcomes, plus Claude's written summary at the end.
-- **Gemma 4 as the planner** (Gemini API):
+- **Gemma 4 as the planner, on Google's Gemini API:**
 
   ```bash
   export GEMINI_API_KEY=...            # PowerShell: $env:GEMINI_API_KEY="..."
-  aegisq migrate demo/fleet.yaml --planner local
+  aegisq migrate demo/fleet.yaml --planner gemma
   ```
-  The first line printed is `planner: local (gemma-4-31b-it @ generativelanguage.googleapis.com)`. Expect "rate limited, retrying" warnings on the free tier; the run carries on.
-- **A model on your own machine** (Ollama shown; LM Studio, llama.cpp and vLLM work the same way):
+  The first line printed is `planner: gemma (gemma-4-31b-it @ generativelanguage.googleapis.com (native API))`. Expect "rate limited, retrying" warnings on the free tier; the run carries on, with Gemma's written summary at the end.
+- **Gemma 4 on your own computer** (no key):
 
   ```bash
-  ollama pull <model>                  # any model with tool calling
-  export AEGISQ_LLM_BASE_URL=http://127.0.0.1:11434/v1
-  export AEGISQ_LLM_MODEL=<model>
-  aegisq migrate demo/fleet.yaml --planner local
+  ollama pull gemma4:e4b
+  aegisq doctor                        # "Gemma 4 planner: gemma4:e4b on this machine (Ollama)"
+  aegisq migrate demo/fleet.yaml --planner gemma
   ```
 
 Reset before re-running:
@@ -226,25 +218,37 @@ for c in modern legacy tls12 ready plain; do docker exec aegisq-app-$c nginx -s 
 docker kill --signal=HUP aegisq-ssh-legacy
 ```
 
+### Gemma 4: live check, red team, claim check, owner brief
+
+```bash
+aegisq gemma-check --api both        # pass/fail for a tool call, an image and a claim extraction, per API
+aegisq redteam                       # scripted hostile model; must print four "pass" lines
+aegisq redteam --planner gemma       # the same sandbox, driven by Gemma 4
+aegisq claims check --image docs/demo/console-claim.png --yes   # demo fleet running
+aegisq brief app-legacy              # after a scan; --template works without a model
+```
+
+Expected for the claim check: `127.0.0.1:8443` CONTRADICTED (the screenshot says enabled, the server is classical), `127.0.0.1:8445` and `127.0.0.1:8446` CONFIRMED. The brief lists its facts, keeps only sentences whose versions, numbers and names appear in the facts they cite, and lists anything it removed. `redteam` needs no key, network or Docker: it runs in a temporary folder.
+
 ## 6. Dashboard
 
 With `aegisq serve` running:
-- **Login:** the signed-out screen shows only the wordmark and the sign-in form. A wrong token gets "Invalid token"; the right one shows the dashboard.
-- **Headline:** reads "N% of your fleet is quantum-safe." with the at-risk count under it, both from the latest scan. The tiles beside it match `aegisq scan`'s summary.
-- **Nav links** (Overview, Run, Approvals, Performance, Audit log) switch views; **Get the report** downloads the HTML report.
-- **Run:** pick *Inventory* and *Scan + fix*, start a run, approve each change beside the lattice, and check the four result steps at the end.
-- **Z slider:** moving it re-ranks services live, and the "already at risk" tile changes.
-- **Rows:** click a row to expand its findings.
-- **Rescan fleet:** runs a new scan (requires `--inventory`).
-- **Download CBOM** and **Report:** both download files.
-- **Audit badge** (top right): "audit intact · N".
-- **Narrow screen:** shrink the browser to phone width; there should be no sideways scrolling.
+- **Sign in:** a wrong password says "Wrong user name or password"; the right one opens Overview. After 20 wrong tries the form says to wait.
+- **Overview:** the fleet map has one square per server, coloured by status, with counts beside it that match `aegisq scan`'s summary. Clicking a count filters the table; clicking a server opens its details (certificate, TLS versions, the risk sum, what to do).
+- **Quantum computer slider:** moving it changes *Needs attention* and the risk column live.
+- **Run:** pick *Inventory* and *Scan and fix*, start, and watch the four steps. A change you started shows "someone else must approve it"; approve it as another user on **Approvals**. The finished table shows each server before and after.
+- **Rescan**, **Download report** and **Download CBOM** on Overview.
+- **Audit log:** the chain check at the top says "intact"; events read as sentences, and clicking one shows its data.
+- **Settings → Appearance:** Light, Dark and Match my system change the whole app and are remembered in this browser.
+- **Narrow screen:** shrink the browser to phone width; the menu moves behind a **Menu** button and nothing scrolls sideways.
 
 API checks with curl:
 ```bash
-TOKEN=...      # the token printed by serve
-curl -s localhost:8000/api/overview -H "Authorization: Bearer $TOKEN" | head -c 300
-curl -s -o /dev/null -w "%{http_code}\n" localhost:8000/api/overview   # 401 without a token
+curl -s -c jar -H "X-AegisQ: 1" -H "Content-Type: application/json" \
+  -d '{"name":"alice","password":"<password>"}' localhost:8000/api/login
+curl -s -b jar localhost:8000/api/overview | head -c 300
+curl -s -o /dev/null -w "%{http_code}\n" localhost:8000/api/overview   # 401 when not signed in
+curl -s -b jar -o /dev/null -w "%{http_code}\n" -X POST localhost:8000/api/logout   # 403 without X-AegisQ
 ```
 
 ## 7. Report and audit log
@@ -261,9 +265,10 @@ aegisq audit tail -n 20
 
 | What | How | Expect |
 |---|---|---|
-| Create users | `aegisq users add priya --role approver` and `aegisq users add vic --role viewer` (or **Settings → Users**) | each prints a token once |
-| Roles | sign in as `vic` | Rescan, Start run and Approve are disabled; no Settings tab |
-| Separation of duties | as an admin or operator, start **Run → Scan + fix**; then sign in as `priya` in a private window and open **Approvals** | the starter sees "another approver has to approve" and no Approve button; `priya` approves and the run continues |
+| Create users | `aegisq users add priya --role approver` and `aegisq users add vic --role viewer` (or **Settings → Users → Add user**) | each asks for a password; they can sign in at once |
+| Roles | sign in as `vic` | Rescan, Start and Approve are disabled; Settings shows only Appearance and Your account |
+| Separation of duties | as an admin or operator, start **Run → Scan and fix**; then sign in as `priya` in a private window and open **Approvals** | the starter sees "someone else must approve it" with Approve disabled; `priya` approves and the run continues |
+| Passwords | as `priya`, change your password in **Settings → Your account**; as an admin, **Set password** for `vic` | `vic`'s open session is signed out at once |
 | Last admin | try to remove or demote the only admin | refused: "at least one admin must remain" |
 | Webhook | **Settings → Alerts**, add a Slack/Teams webhook (or `https://webhook.site` for a throwaway URL), then **Send a test alert** | the message arrives; "delivered: HTTP 200" |
 | Approval alert | start a fix run with the webhook set | "a change to … is waiting for approval" within about 15 seconds |
@@ -327,5 +332,5 @@ rm -rf "$AEGISQ_HOME"
 
 ## What can't be tested offline
 
-- **Claude and Gemma planners:** need `ANTHROPIC_API_KEY` or `GEMINI_API_KEY`. The offline tests use scripted fake models that try to bypass the guardrails, plus a local HTTP server for the Gemma client's retries.
+- **Gemma 4 itself:** needs `GEMINI_API_KEY` or Gemma 4 in Ollama. The offline tests use scripted fake models (including one that obeys a prompt injection) and local HTTP servers that speak both the OpenAI-compatible and the native Gemini API formats. Run `aegisq gemma-check --api both` to test the real model.
 - **Scanning public sites:** needs internet without TLS interception.

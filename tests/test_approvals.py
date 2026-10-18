@@ -23,7 +23,7 @@ def test_lifecycle_and_binding(ws: Workspace) -> None:
 
 def test_only_named_humans_decide_and_only_once(ws: Workspace) -> None:
     a = mk(ws)
-    for who in ("", "agent", "Claude", "aegisq", "  "):
+    for who in ("", "agent", "Gemma", "aegisq", "  "):
         with pytest.raises(PermissionError):
             ws.approvals.decide(a.id, True, who)
     ws.approvals.decide(a.id, False, "bob", "no")

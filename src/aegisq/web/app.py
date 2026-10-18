@@ -1,14 +1,18 @@
 """Dashboard and REST API.
 
-Security model: every /api route requires a bearer token. Tokens map to people and roles
-(users created with `aegisq users add`, stored only as hashes, or AEGISQ_API_TOKENS); if
-neither exists a one-time admin token is generated and printed. Each route checks the
-role's permission (view, run, approve, admin). The approver identity is taken from the
-token, never from the request body. Responses carry a strict CSP; the page loads no third-party code.
+Security model: people sign in with a user name and password (scrypt hashes in state.db). A sign-in
+sets an HttpOnly, SameSite=Strict session cookie; the server keeps only its hash. Every /api route
+except sign-in requires a session, and every state-changing request must also carry the
+``X-AegisQ: 1`` header, which a cross-site page cannot add without a CORS preflight that this server
+never grants. Each route checks the role's permission (view, run, approve, admin); the approver
+identity comes from the session, never from the request body. With no users yet, the first admin can
+be created from this computer only, or with `aegisq users add`. Responses carry a strict CSP; the
+page loads no third-party code.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import secrets
@@ -27,10 +31,10 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Res
 from pydantic import BaseModel, ConfigDict, Field
 
 from aegisq import __version__
-from aegisq.config import AegisQConfig, api_tokens
+from aegisq.config import AegisQConfig
 from aegisq.models import ServiceScan
 from aegisq.risk import RESOURCE_ESTIMATE_NOTE, RESOURCE_ESTIMATES, rank
-from aegisq.users import GRANTS, User, UserStore, can, env_users, token_hash
+from aegisq.users import GRANTS, MAX_PASSWORD, SESSION_MAX_S, User, UserStore, can
 from aegisq.workspace import Workspace
 
 CSP = (
@@ -39,9 +43,13 @@ CSP = (
 )
 _STATIC = {
     "app.js": "text/javascript; charset=utf-8",
-    "app.css": "text/css; charset=utf-8",
+    "boot.js": "text/javascript; charset=utf-8",
     "ui.css": "text/css; charset=utf-8",
     "favicon.svg": "image/svg+xml",
+    "plex-sans-400.woff2": "font/woff2",
+    "plex-sans-500.woff2": "font/woff2",
+    "plex-sans-600.woff2": "font/woff2",
+    "OFL-plex-sans.txt": "text/plain; charset=utf-8",
 }
 
 
@@ -49,6 +57,19 @@ class NewUser(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$")
     role: Literal["viewer", "operator", "approver", "admin"]
+    password: str = Field(max_length=MAX_PASSWORD)
+
+
+class Credentials(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(max_length=64)
+    password: str = Field(max_length=MAX_PASSWORD)
+
+
+class NewPassword(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    password: str = Field(max_length=MAX_PASSWORD)
+    current: str | None = Field(default=None, max_length=MAX_PASSWORD)
 
 
 class RoleChange(BaseModel):
@@ -96,7 +117,7 @@ class ScanJob(_Req):
 
 class MigrateJob(_Req):
     kind: Literal["migrate"]
-    planner: Literal["auto", "local", "rules", "claude"] = "auto"
+    planner: Literal["auto", "gemma", "rules"] = "auto"
     services: list[Annotated[str, Field(pattern=_SERVICE_NAME)]] = Field(default_factory=list, max_length=200)
 
 
@@ -110,31 +131,93 @@ class BenchmarkJob(_Req):
 JobRequest = Annotated[ScanJob | MigrateJob | BenchmarkJob, Field(discriminator="kind")]
 
 
+class ClaimSource(_Req):
+    text: str | None = Field(default=None, max_length=64_000)
+    image: str | None = Field(default=None, max_length=7_000_000)  # base64, at most 5 MB decoded
+
+
+class ClaimPick(_Req):
+    endpoints: list[int] = Field(min_length=1, max_length=50)
+
+
+_SERVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+class BriefRequest(_Req):
+    service: str = Field(pattern=_SERVICE_RE.pattern)
+    template: bool = False
+
+
+SESSION_COOKIE = "aegisq_session"
+CSRF_HEADER = "x-aegisq"
+_UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
+
+
 class _AuthLimiter:
-    """Slow down token guessing: at most 20 failures per client per 5 minutes."""
+    """Slow down password guessing: at most 20 failures per key (client or user name) per 5 minutes."""
 
     def __init__(self, limit: int = 20, window: float = 300) -> None:
         self.limit, self.window = limit, window
         self.fails: dict[str, deque[float]] = defaultdict(deque)
         self.lock = threading.Lock()
 
-    def blocked(self, client: str) -> bool:
-        with self.lock:
-            q = self.fails[client]
-            now = time.monotonic()
-            while q and now - q[0] > self.window:
-                q.popleft()
-            return len(q) >= self.limit
+    def _trim(self, key: str, now: float) -> deque[float]:
+        q = self.fails[key]
+        while q and now - q[0] > self.window:
+            q.popleft()
+        return q
 
-    def fail(self, client: str) -> None:
+    def acquire(self, keys: tuple[str, ...]) -> bool:
+        """Count this attempt against every key before the password is checked, atomically, so parallel
+        guesses cannot slip past the limit. False when any key is already at the limit."""
         with self.lock:
-            self.fails[client].append(time.monotonic())
+            now = time.monotonic()
+            if any(len(self._trim(k, now)) >= self.limit for k in keys):
+                return False
+            for k in keys:
+                self.fails[k].append(now)
+            return True
+
+    def forgive(self, keys: tuple[str, ...]) -> None:
+        """The attempt succeeded: it does not count as a failure."""
+        with self.lock:
+            for k in keys:
+                if self.fails[k]:
+                    self.fails[k].pop()
+
+
+def _is_loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host == "localhost"
+
+
+def _initial_admin(users: UserStore, ws: Workspace) -> None:
+    """Containers and scripted installs: AEGISQ_ADMIN_USER / AEGISQ_ADMIN_PASSWORD create the first admin once."""
+    if os.environ.get("AEGISQ_API_TOKENS"):
+        print(
+            "AEGISQ_API_TOKENS is no longer used: people sign in with a user name and password. "
+            "Create users with `aegisq users add NAME --role ROLE`.",
+            file=sys.stderr,
+            flush=True,
+        )
+    name, password = os.environ.get("AEGISQ_ADMIN_USER"), os.environ.get("AEGISQ_ADMIN_PASSWORD")
+    if name and password and users.get(name) is None:
+        users.add(name, "admin", password, created_by="environment")
+        ws.audit.append("user.created", {"name": name, "role": "admin", "via": "AEGISQ_ADMIN_USER"}, actor="system")
+    elif users.count() == 0:
+        print(
+            "AegisQ has no users yet. Open the dashboard on this computer to create the first admin, "
+            "or run `aegisq users add NAME --role admin`.",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def create_app(
     cfg: AegisQConfig,
     inventory: str | None = None,
-    tokens: dict[str, str] | None = None,
     config_path: str | None = None,
     jobs_enabled: bool = True,
     background: bool = False,
@@ -143,12 +226,7 @@ def create_app(
 
     ws = Workspace(cfg.home_path)
     users = UserStore(ws.home / "state.db")
-    toks = tokens if tokens is not None else api_tokens()
-    if not toks and not users.list():
-        generated = secrets.token_urlsafe(24)
-        toks = {generated: "admin"}
-        print(f"AegisQ dashboard token (this run only): {generated}", file=sys.stderr, flush=True)
-    env = env_users(toks)
+    _initial_admin(users, ws)
     limiter = _AuthLimiter()
     scan_state: dict[str, Any] = {"running": False, "last": None, "error": None}
     scan_lock = threading.Lock()
@@ -196,18 +274,50 @@ def create_app(
             resp.headers["Cache-Control"] = "no-store"
         return resp
 
+    @app.middleware("http")
+    async def csrf(request: Request, call_next: Any) -> Response:
+        unsafe = request.method in _UNSAFE and request.url.path.startswith("/api")
+        if unsafe and request.headers.get(CSRF_HEADER) != "1":
+            return JSONResponse({"detail": "missing X-AegisQ header"}, status_code=403)
+        resp: Response = await call_next(request)
+        return resp
+
     def principal(request: Request) -> User:
-        client = request.client.host if request.client else "unknown"
-        if limiter.blocked(client):
-            raise HTTPException(429, "too many failed authentication attempts")
-        auth = request.headers.get("authorization", "")
-        scheme, _, token = auth.partition(" ")
-        if scheme.lower() == "bearer" and token and len(token) <= 512:
-            u = env.get(token_hash(token)) or users.by_token(token)
-            if u is not None:
-                return u
-        limiter.fail(client)
-        raise HTTPException(401, "missing or invalid bearer token", headers={"WWW-Authenticate": "Bearer"})
+        sid = request.cookies.get(SESSION_COOKIE, "")
+        u = users.session_user(sid) if sid else None
+        if u is None:
+            raise HTTPException(401, "sign in to continue")
+        return u
+
+    def _client(request: Request) -> str:
+        return request.client.host if request.client else "unknown"
+
+    def _local_only(request: Request) -> bool:
+        """The request comes from this computer and not through a proxy."""
+        forwarded = any(h in request.headers for h in ("x-forwarded-for", "forwarded", "x-real-ip"))
+        return _is_loopback(_client(request)) and not forwarded
+
+    def _sign_in(request: Request, user: User) -> JSONResponse:
+        sid = users.start_session(user.name)
+        resp = JSONResponse(_me(user))
+        resp.set_cookie(
+            SESSION_COOKIE,
+            sid,
+            max_age=SESSION_MAX_S,
+            httponly=True,
+            samesite="strict",
+            secure=request.url.scheme == "https",
+            path="/",
+        )
+        return resp
+
+    def _me(u: User) -> dict[str, Any]:
+        return {
+            "identity": u.name,
+            "role": u.role,
+            "permissions": sorted(GRANTS[u.role]),
+            "separation_of_duties": cfg.agent.separation_of_duties,
+        }
 
     def identity(request: Request) -> str:
         return principal(request).name
@@ -244,17 +354,66 @@ def create_app(
     def static(name: str) -> Response:
         if name not in _STATIC:
             raise HTTPException(404)
-        return Response(_static_text(name), media_type=_STATIC[name])
+        cache = "public, max-age=31536000, immutable" if name.endswith(".woff2") else "no-cache"
+        return Response(_static_bytes(name), media_type=_STATIC[name], headers={"Cache-Control": cache})
 
     # ---------------------------------------------------------------- API
     @app.get("/api/me")
     def me(u: User = Depends(principal)) -> dict[str, Any]:  # noqa: B008 - FastAPI dependency
-        return {
-            "identity": u.name,
-            "role": u.role,
-            "permissions": sorted(GRANTS[u.role]),
-            "separation_of_duties": cfg.agent.separation_of_duties,
-        }
+        return _me(u)
+
+    @app.get("/api/setup")
+    def setup_status(request: Request) -> dict[str, Any]:
+        needed = users.count() == 0
+        return {"needed": needed, "allowed": needed and _local_only(request)}
+
+    @app.post("/api/setup")
+    def setup(body: Credentials, request: Request) -> JSONResponse:
+        if users.count():
+            raise HTTPException(409, "AegisQ already has users: sign in instead")
+        if not _local_only(request):
+            raise HTTPException(
+                403, "create the first admin on the computer running AegisQ, or with `aegisq users add`"
+            )
+        try:
+            u = users.add(body.name, "admin", body.password, created_by="setup")
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+        ws.audit.append("user.created", {"name": u.name, "role": "admin", "via": "first-run setup"}, actor=u.name)
+        return _sign_in(request, u)
+
+    @app.post("/api/login")
+    def login(body: Credentials, request: Request) -> JSONResponse:
+        keys = (f"client:{_client(request)}", f"user:{body.name.lower()}")
+        if not limiter.acquire(keys):
+            raise HTTPException(429, "too many failed sign-ins: wait a few minutes and try again")
+        u = users.verify(body.name, body.password)
+        if u is None:
+            ws.audit.append("user.sign_in_failed", {"name": body.name[:64], "client": _client(request)})
+            raise HTTPException(401, "wrong user name or password")
+        limiter.forgive(keys)
+        ws.audit.append("user.signed_in", {"client": _client(request)}, actor=u.name)
+        return _sign_in(request, u)
+
+    @app.post("/api/logout")
+    def logout(request: Request) -> JSONResponse:
+        sid = request.cookies.get(SESSION_COOKIE, "")
+        if sid:
+            users.end_session(sid)
+        resp = JSONResponse({"signed_out": True})
+        resp.delete_cookie(SESSION_COOKIE, path="/")
+        return resp
+
+    @app.post("/api/me/password")
+    def change_password(body: NewPassword, request: Request, u: User = Depends(principal)) -> dict[str, Any]:  # noqa: B008
+        if body.current is None or users.verify(u.name, body.current) is None:
+            raise HTTPException(403, "your current password is not right")
+        try:
+            users.set_password(u.name, body.password, keep_session=request.cookies.get(SESSION_COOKIE))
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+        ws.audit.append("user.password_changed", {"name": u.name, "via": "dashboard"}, actor=u.name)
+        return {"changed": True}
 
     overview_cache: dict[tuple[object, ...], dict[str, Any]] = {}
     overview_lock = threading.Lock()
@@ -310,6 +469,15 @@ def create_app(
                     "group": _display_group(s),
                     "findings": s.findings,
                     "errors": s.errors,
+                    "margin": r.margin,
+                    "severity": r.severity,
+                    "at_risk": r.at_risk,
+                    "breaks_even_z": r.breaks_even_z,
+                    "kind": s.service.managed.kind if s.service.managed else None,
+                    "platform": s.service.platform,
+                    "starttls": s.service.starttls,
+                    "owner": s.service.owner,
+                    "advice": None if s.service.managed or s.pq_ready else _advice(s),
                 }
             )
         out["services"].sort(key=lambda r: r["rank"])
@@ -377,6 +545,163 @@ def create_app(
         bom = build_cbom(report)
         validate_cbom(bom)
         return JSONResponse(bom, headers={"Content-Disposition": 'attachment; filename="cbom.json"'})
+
+    claim_lock = threading.Lock()
+
+    # --------------------------------------------------------------- briefs
+    @app.get("/api/brief/{service}")
+    def get_brief(service: str, who: str = Depends(identity)) -> dict[str, Any]:
+        if not _SERVICE_RE.match(service):
+            raise HTTPException(404, "no brief for this server yet")
+        data = ws.load_json(f"briefs/{service}.json")
+        if not data:
+            raise HTTPException(404, "no brief for this server yet")
+        return dict(data)
+
+    @app.post("/api/brief")
+    def new_brief(body: BriefRequest, who: str = Depends(can_run)) -> dict[str, Any]:
+        from aegisq.agent import brief
+        from aegisq.agent.claims import gemma_client
+        from aegisq.agent.tools import apply_facts
+
+        if not jobs_enabled:
+            raise HTTPException(403, "this dashboard is read-only (started with --read-only)")
+        report = ws.latest_scan()
+        scan = (
+            next((s for s in apply_facts(report.results, ws) if s.service.name == body.service), None)
+            if report
+            else None
+        )
+        if scan is None:
+            raise HTTPException(404, f"no server named {body.service!r} in the latest scan")
+        post = model = None
+        if not body.template:
+            from aegisq.agent.runner import gemma_status
+
+            ok, why = gemma_status(cfg.agent)
+            if not ok:
+                raise HTTPException(409, f"Gemma 4 is not set up: {why}")
+            try:
+                post, ep = gemma_client(cfg.agent)
+                model = ep.model
+            except RuntimeError as e:
+                raise HTTPException(409, f"Gemma 4 is not set up: {e}") from None
+        if not claim_lock.acquire(blocking=False):
+            raise HTTPException(409, "Gemma 4 is busy with another request")
+        try:
+            b = brief.write(ws, scan, cfg.risk, post, model, who=who)
+        finally:
+            claim_lock.release()
+        return b.to_dict()
+
+    # --------------------------------------------------------------- claims
+
+    @app.get("/api/claims")
+    def list_claims(who: str = Depends(identity)) -> list[dict[str, Any]]:
+        from aegisq.agent import claims as cl
+
+        out = []
+        for p in sorted((ws.home / "claims").glob("chk-*.json"), reverse=True):
+            if p.stem.endswith("-scan"):
+                continue
+            ext = cl.load(ws, p.stem)
+            if ext is None:
+                continue
+            out.append(
+                {
+                    "id": ext.id,
+                    "created_at": ext.created_at,
+                    "created_by": ext.created_by,
+                    "source": ext.source,
+                    "endpoints": len(ext.endpoints),
+                    "summary": cl.summarize(ext.checks) if ext.checks else None,
+                }
+            )
+            if len(out) >= 20:
+                break
+        return out
+
+    @app.get("/api/claims/{cid}")
+    def get_claim(cid: str, who: str = Depends(identity)) -> dict[str, Any]:
+        from aegisq.agent import claims as cl
+
+        ext = cl.load(ws, cid)
+        if ext is None:
+            raise HTTPException(404, "no such check")
+        return ext.model_dump(mode="json")
+
+    @app.post("/api/claims")
+    def new_claim(body: ClaimSource, who: str = Depends(can_run)) -> dict[str, Any]:
+        import base64
+        import binascii
+
+        from aegisq.agent import claims as cl
+
+        if not jobs_enabled:
+            raise HTTPException(403, "this dashboard is read-only (started with --read-only)")
+        image = None
+        if body.image:
+            try:
+                image = base64.b64decode(body.image.split(",", 1)[-1], validate=True)
+            except (binascii.Error, ValueError):
+                raise HTTPException(422, "image is not valid base64") from None
+        try:
+            post, ep = cl.gemma_client(cfg.agent)
+        except RuntimeError as e:
+            raise HTTPException(409, f"Gemma 4 is not set up: {e}") from None
+        if not claim_lock.acquire(blocking=False):
+            raise HTTPException(409, "another check is running")
+        try:
+            ext = cl.extract(post, ep.model, text=body.text, image=image, who=who)
+        except cl.ClaimError as e:
+            raise HTTPException(422, str(e)) from None
+        except RuntimeError as e:
+            raise HTTPException(502, f"the model endpoint failed: {e}") from None
+        finally:
+            claim_lock.release()
+        cl.record_extraction(ws, ext)
+        return ext.model_dump(mode="json")
+
+    @app.post("/api/claims/{cid}/verify")
+    def verify_claim(cid: str, body: ClaimPick, who: str = Depends(can_run)) -> dict[str, Any]:
+        from aegisq.agent import claims as cl
+        from aegisq.netutil import Scope
+        from aegisq.scanner.engine import ScanOptions
+
+        if not jobs_enabled:
+            raise HTTPException(403, "this dashboard is read-only (started with --read-only)")
+        ext = cl.load(ws, cid)
+        if ext is None:
+            raise HTTPException(404, "no such check")
+        sc = cfg.scan
+        opts = ScanOptions(
+            timeout=sc.timeout,
+            concurrency=sc.concurrency,
+            legacy_protocols=False,
+            scope=Scope(sc.scope.allow, sc.scope.deny),
+        )
+        if not claim_lock.acquire(blocking=False):
+            raise HTTPException(409, "another check is running")
+        try:
+            cl.verify(ws, ext, body.endpoints, opts, who)
+        except cl.ClaimError as e:
+            raise HTTPException(422, str(e)) from None
+        finally:
+            claim_lock.release()
+        return ext.model_dump(mode="json")
+
+    @app.get("/api/claims/{cid}/cbom")
+    def claim_cbom(cid: str, who: str = Depends(identity)) -> JSONResponse:
+        from aegisq.agent import claims as cl
+        from aegisq.cbom import build_cbom, validate_cbom
+
+        ext = cl.load(ws, cid)
+        report = cl.scan_report(ws, ext) if ext else None
+        if report is None:
+            raise HTTPException(404, "this check has no scan yet")
+        bom = build_cbom(report)
+        validate_cbom(bom)
+        return JSONResponse(bom, headers={"Content-Disposition": f'attachment; filename="cbom-{cid}.json"'})
 
     # ----------------------------------------------------------------- jobs
     def _inventory_targets() -> list[Any]:
@@ -485,35 +810,30 @@ def create_app(
 
     # ---------------------------------------------------------------- users
     def _all_admins_after(change: dict[str, str | None]) -> int:
-        roles = {u.name: u.role for u in users.list()}
+        roles = {u.name: u.role for u in users.all()}
         for name, role in change.items():
             if role is None:
                 roles.pop(name, None)
             else:
                 roles[name] = role
-        return sum(r == "admin" for r in roles.values()) + sum(u.role == "admin" for u in env.values())
+        return sum(r == "admin" for r in roles.values())
 
     def _db_user(name: str) -> None:
-        if any(u.name == name for u in env.values()):
-            raise HTTPException(409, f"{name} is defined in AEGISQ_API_TOKENS; change it there")
-        if not any(u.name == name for u in users.list()):
+        if users.get(name) is None:
             raise HTTPException(404, "no such user")
 
     @app.get("/api/users")
     def list_users(who: str = Depends(is_admin)) -> list[dict[str, Any]]:
-        seen = {u.name for u in env.values()}
-        return [u.to_dict() for u in env.values()] + [u.to_dict() for u in users.list() if u.name not in seen]
+        return [u.to_dict() for u in users.all()]
 
     @app.post("/api/users", status_code=201)
     def add_user(body: NewUser, who: str = Depends(is_admin)) -> dict[str, Any]:
-        if any(u.name == body.name for u in env.values()):
-            raise HTTPException(409, f"{body.name} is defined in AEGISQ_API_TOKENS")
         try:
-            token = users.add(body.name, body.role, created_by=who)
+            u = users.add(body.name, body.role, body.password, created_by=who)
         except ValueError as e:
             raise HTTPException(409 if "exists" in str(e) else 422, str(e)) from None
         ws.audit.append("user.created", {"name": body.name, "role": body.role, "via": "dashboard"}, actor=who)
-        return {"name": body.name, "role": body.role, "token": token}
+        return u.to_dict()
 
     @app.patch("/api/users/{name}")
     def set_role(name: str, body: RoleChange, who: str = Depends(is_admin)) -> dict[str, Any]:
@@ -524,12 +844,15 @@ def create_app(
         ws.audit.append("user.role_changed", {"name": name, "role": body.role, "via": "dashboard"}, actor=who)
         return {"name": name, "role": body.role}
 
-    @app.post("/api/users/{name}/token")
-    def rotate_token(name: str, who: str = Depends(is_admin)) -> dict[str, Any]:
+    @app.post("/api/users/{name}/password")
+    def reset_password(name: str, body: NewPassword, who: str = Depends(is_admin)) -> dict[str, Any]:
         _db_user(name)
-        token = users.rotate(name)
-        ws.audit.append("user.token_rotated", {"name": name, "via": "dashboard"}, actor=who)
-        return {"name": name, "token": token}
+        try:
+            users.set_password(name, body.password)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+        ws.audit.append("user.password_reset", {"name": name, "via": "dashboard"}, actor=who)
+        return {"name": name, "reset": True}
 
     @app.delete("/api/users/{name}")
     def remove_user(name: str, who: str = Depends(is_admin)) -> dict[str, Any]:
@@ -656,24 +979,12 @@ def _https_url(raw: str) -> str:
 
 def _capabilities(cfg: AegisQConfig, targets: list[Any], has_inventory: bool, jobs_enabled: bool) -> dict[str, Any]:
     """What the dashboard can start here, with the reason when something is unavailable."""
-    from importlib.util import find_spec
-
-    from aegisq.agent.runner import resolve_local_endpoint
+    from aegisq.agent.runner import gemma_status
 
     def item(ok: bool, detail: str) -> dict[str, Any]:
         return {"ok": ok, "detail": detail}
 
-    try:
-        ep = resolve_local_endpoint(cfg.agent)
-        configured = bool(ep.api_key or os.environ.get("AEGISQ_LLM_BASE_URL") or cfg.agent.local_base_url)
-        local = item(configured, ep.label if configured else "set GEMINI_API_KEY (Gemma 4) or AEGISQ_LLM_BASE_URL")
-    except RuntimeError as e:
-        local = item(False, str(e))
-    has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
-    if find_spec("anthropic") is None:
-        claude = item(False, "pip install 'aegisq[agent]'")
-    else:
-        claude = item(has_anthropic, cfg.agent.model if has_anthropic else "set ANTHROPIC_API_KEY")
+    gemma = item(*gemma_status(cfg.agent))
     return {
         "jobs": jobs_enabled,
         "inventory": has_inventory,
@@ -681,9 +992,15 @@ def _capabilities(cfg: AegisQConfig, targets: list[Any], has_inventory: bool, jo
             {"name": t.name, "endpoint": t.endpoint, "protocol": t.protocol.value, "managed": t.managed is not None}
             for t in targets
         ],
-        "planners": {"rules": item(True, "deterministic, no AI"), "local": local, "claude": claude},
+        "planners": {"rules": item(True, "deterministic, no AI"), "gemma": gemma},
         "schedules": has_inventory and jobs_enabled,
     }
+
+
+def _advice(s: ServiceScan) -> str:
+    from aegisq.agent.advice import advice_for
+
+    return advice_for(s.service.platform, s.service.protocol.value).removeprefix("not managed by AegisQ: ")
 
 
 def _display_group(s: ServiceScan) -> str | None:
@@ -699,3 +1016,7 @@ def _display_group(s: ServiceScan) -> str | None:
 
 def _static_text(name: str) -> str:
     return (resources.files("aegisq") / "web" / "static" / name).read_text(encoding="utf-8")
+
+
+def _static_bytes(name: str) -> bytes:
+    return (resources.files("aegisq") / "web" / "static" / name).read_bytes()

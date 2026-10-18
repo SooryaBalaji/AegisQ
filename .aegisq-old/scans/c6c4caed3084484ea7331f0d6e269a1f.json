@@ -1,0 +1,113 @@
+{
+  "scan_id": "c6c4caed3084484ea7331f0d6e269a1f",
+  "started_at": "2026-10-04T01:15:16.974102Z",
+  "finished_at": "2026-10-04T01:15:17.281869Z",
+  "tool_version": "1.0.0",
+  "backend": "tls=native,ssh=native",
+  "results": [
+    {
+      "service": {
+        "name": "cloudfare.com-443",
+        "host": "cloudfare.com",
+        "port": 443,
+        "protocol": "tls",
+        "sni": null,
+        "data_category": "unknown",
+        "owner": null,
+        "tags": [],
+        "retention_years": null,
+        "migration_years": null,
+        "stack": {},
+        "managed": null
+      },
+      "status": "pq_ready",
+      "backend": "native",
+      "scanned_at": "2026-10-04T01:15:17.278244Z",
+      "duration_ms": 304.64,
+      "resolved_ip": "172.67.211.231",
+      "tls": {
+        "pq_ready": true,
+        "pq_group": "X25519MLKEM768",
+        "pq_probe": {
+          "outcome": "accepted",
+          "version": "TLSv1.3",
+          "group": "X25519MLKEM768",
+          "cipher_suite": "TLS_AES_128_GCM_SHA256",
+          "hello_retry": false,
+          "alert": null,
+          "detail": null,
+          "client_hello_bytes": 1435,
+          "client_key_share_bytes": 1216,
+          "server_key_share_bytes": 1120,
+          "elapsed_ms": 28.76
+        },
+        "modern_probe": {
+          "outcome": "accepted",
+          "version": "TLSv1.3",
+          "group": "X25519MLKEM768",
+          "cipher_suite": "TLS_AES_128_GCM_SHA256",
+          "hello_retry": false,
+          "alert": null,
+          "detail": null,
+          "client_hello_bytes": 1513,
+          "client_key_share_bytes": 1248,
+          "server_key_share_bytes": 1120,
+          "elapsed_ms": 25.9
+        },
+        "tls12_probe": {
+          "outcome": "accepted",
+          "version": "TLSv1.2",
+          "group": "x25519",
+          "cipher_suite": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+          "hello_retry": false,
+          "alert": null,
+          "detail": null,
+          "client_hello_bytes": 230,
+          "client_key_share_bytes": null,
+          "server_key_share_bytes": null,
+          "elapsed_ms": 34.17
+        },
+        "supports": {
+          "TLSv1.3": true,
+          "TLSv1.2": true,
+          "TLSv1.1": true,
+          "TLSv1.0": true
+        },
+        "tls12_key_exchange": "ECDHE x25519",
+        "certificate": {
+          "subject": "CN=cloudfare.com",
+          "issuer": "CN=WE1,O=Google Trust Services,C=US",
+          "serial": "e25d44965c4d1ef413ac6be8e73d946a",
+          "not_before": "2026-08-31T10:02:09Z",
+          "not_after": "2026-11-29T11:01:58Z",
+          "days_to_expiry": 56,
+          "expired": false,
+          "self_signed": false,
+          "key_type": "EC",
+          "key_size": 256,
+          "curve": "secp256r1",
+          "signature_algorithm": "ecdsa-with-SHA256",
+          "signature_hash": "sha256",
+          "san": [
+            "cloudfare.com",
+            "*.cloudfare.com"
+          ],
+          "sha256_fingerprint": "6213c1156c257ae77b7234727bbe5cfd6c82b535b4087d3286e1c5336c937a63",
+          "quantum_safe": false
+        },
+        "plaintext_http": false,
+        "http_server": null
+      },
+      "ssh": null,
+      "errors": [],
+      "findings": [
+        "Deprecated TLS 1.0/1.1 still enabled.",
+        "Certificate key (EC) is not quantum-safe; lower urgency than key exchange because forged signatures only matter live."
+      ]
+    }
+  ],
+  "environment": {
+    "python": "3.11.9",
+    "platform": "Windows-10"
+  }
+}

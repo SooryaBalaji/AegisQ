@@ -207,7 +207,7 @@ class Ops:
         self.alerts = AlertStore(ws.home / "state.db")
         self.start_scan = start_scan
         self._post = post or _http_post
-        self._seen_approvals: set[str] | None = None
+        self._approvals_since: float | None = None
         self._audit_alerted = False
         self._last_audit_check = 0.0
         self._stop = threading.Event()
@@ -282,20 +282,22 @@ class Ops:
             )
 
     def watch_approvals(self) -> None:
-        pending = self.ws.approvals.list("pending", limit=100)
-        ids = {a.id for a in pending}
-        if self._seen_approvals is None:
-            self._seen_approvals = ids
+        """Alert on every approval requested since the last tick, including ones already decided in between."""
+        recent = self.ws.approvals.list(limit=100)
+        if self._approvals_since is None:
+            self._approvals_since = max((a.requested_at for a in recent), default=0.0)
             return
-        for a in pending:
-            if a.id not in self._seen_approvals:
-                who = f" (started by {a.initiated_by}; someone else must approve)" if a.require_other else ""
-                self.send(
-                    "approval",
-                    f"AegisQ: a change to {a.service} is waiting for approval: {a.summary}{who}.",
-                    {"approval_id": a.id, "service": a.service},
-                )
-        self._seen_approvals = ids
+        new = sorted((a for a in recent if a.requested_at > self._approvals_since), key=lambda a: a.requested_at)
+        for a in new:
+            who = f" (started by {a.initiated_by}; someone else must approve)" if a.require_other else ""
+            state = "is waiting for approval" if a.status == "pending" else f"was requested and is already {a.status}"
+            self.send(
+                "approval",
+                f"AegisQ: a change to {a.service} {state}: {a.summary}{who}.",
+                {"approval_id": a.id, "service": a.service, "status": a.status},
+            )
+        if new:
+            self._approvals_since = new[-1].requested_at
 
     def watch_audit(self, now: float) -> None:
         if now - self._last_audit_check < 300:

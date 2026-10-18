@@ -1,0 +1,50 @@
+{
+  "url": "https://cloudfare.com:443/",
+  "method": "native",
+  "results": [
+    {
+      "label": "X25519MLKEM768 (to ServerHello, native)",
+      "group": "X25519MLKEM768",
+      "negotiated": "X25519MLKEM768",
+      "n": 200,
+      "failures": 0,
+      "client_hello_bytes": 1435,
+      "client_key_share_bytes": 1216,
+      "server_key_share_bytes": 1120,
+      "p50_ms": 26.773,
+      "p99_ms": 48.412,
+      "mean_ms": 27.764
+    },
+    {
+      "label": "x25519 (to ServerHello, native)",
+      "group": "x25519",
+      "negotiated": "x25519",
+      "n": 200,
+      "failures": 0,
+      "client_hello_bytes": 251,
+      "client_key_share_bytes": 32,
+      "server_key_share_bytes": 32,
+      "p50_ms": 25.879,
+      "p99_ms": 74.338,
+      "mean_ms": 32.512
+    }
+  ],
+  "sizes": {
+    "client_key_share": {
+      "pq": 1216,
+      "classical": 32
+    },
+    "server_key_share": {
+      "pq": 1120,
+      "classical": 32
+    },
+    "client_hello": {
+      "pq": 1435,
+      "classical": 251
+    },
+    "extra_bytes_per_handshake": 2272,
+    "packet_split": "PQ ClientHello is 1435 bytes; AegisQ's minimal hello fits one segment, but browser hellos with GREASE and more extensions exceed 1,460 bytes and are split across two TCP segments - this has broken some older middleboxes."
+  },
+  "caveat": "Measured against the target as configured; on localhost there is no network delay, so these numbers are computation cost only. Real-world latency also depends on round trips and packet loss.",
+  "measured_at": "2026-10-04T02:55:20Z"
+}

@@ -1,0 +1,52 @@
+{
+  "N": 15,
+  "a": 7,
+  "counting_qubits": 8,
+  "shots": 2048,
+  "outcomes": [
+    {
+      "bits": "00000000",
+      "count": 515,
+      "share": 0.2515,
+      "phase": 0.0,
+      "fraction": "0/1",
+      "r": 1,
+      "valid_period": false
+    },
+    {
+      "bits": "01000000",
+      "count": 514,
+      "share": 0.251,
+      "phase": 0.25,
+      "fraction": "1/4",
+      "r": 4,
+      "valid_period": true
+    },
+    {
+      "bits": "10000000",
+      "count": 510,
+      "share": 0.249,
+      "phase": 0.5,
+      "fraction": "1/2",
+      "r": 2,
+      "valid_period": false
+    },
+    {
+      "bits": "11000000",
+      "count": 509,
+      "share": 0.2485,
+      "phase": 0.75,
+      "fraction": "3/4",
+      "r": 4,
+      "valid_period": true
+    }
+  ],
+  "period": 4,
+  "factors": [
+    3,
+    5
+  ],
+  "disclaimer": "N = 15 is a toy. This circuit hard-codes multiplication by 7 mod 15 as a fixed permutation, which is only possible because the answer is already known; many past hardware 'demonstrations' on 15 used the same shortcut. Breaking X25519 needs ~1,200-1,450 error-corrected logical qubits; today's devices have none at that scale.",
+  "backend": "aer_simulator (noiseless)",
+  "job_id": null
+}

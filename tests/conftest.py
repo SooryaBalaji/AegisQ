@@ -17,13 +17,13 @@ from fakes import FAKE_NGINX
 # so nothing can reach a paid or rate-limited API (tests that need them set fakes explicitly).
 os.environ["AEGISQ_ENV_FILE"] = str(Path(__file__).parent / "no-such-dir" / ".env")
 for _var in (
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "AEGISQ_LLM_BASE_URL",
     "AEGISQ_LLM_MODEL",
     "AEGISQ_LLM_API_KEY",
+    "AEGISQ_LLM_API",
+    "AEGISQ_LLM_FALLBACK_MODELS",
     "AEGISQ_AUDIT_KEY",
 ):
     os.environ.pop(_var, None)
@@ -47,7 +47,8 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     h = tmp_path / "aegisq-home"
     monkeypatch.setenv("AEGISQ_HOME", str(h))
     monkeypatch.delenv("AEGISQ_AUDIT_KEY", raising=False)
-    monkeypatch.delenv("AEGISQ_API_TOKENS", raising=False)
+    for var in ("AEGISQ_API_TOKENS", "AEGISQ_ADMIN_USER", "AEGISQ_ADMIN_PASSWORD"):
+        monkeypatch.delenv(var, raising=False)
     return h
 
 
@@ -81,3 +82,26 @@ def fake_nginx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, obj
     monkeypatch.setenv("FAKE_NGINX_STATE", str(state))
     monkeypatch.setenv("FAKE_OPENSSL", "3.5.0")
     return {"conf": conf, "state": state, "argv": [sys.executable, str(exe)], "dir": d}
+
+
+PASSWORD = "correct horse battery"
+
+
+def add_user(cfg: AegisQConfig, name: str, role: str = "admin", password: str = PASSWORD) -> None:
+    from aegisq.users import UserStore
+
+    UserStore(Workspace(cfg.home_path).home / "state.db").add(name, role, password, created_by="test")
+
+
+def browser(app, client: tuple[str, int] = ("127.0.0.1", 50000)):
+    """A TestClient that behaves like the dashboard: sends X-AegisQ and keeps the session cookie."""
+    from fastapi.testclient import TestClient
+
+    return TestClient(app, headers={"X-AegisQ": "1"}, client=client)
+
+
+def signed_in(app, name: str, password: str = PASSWORD):
+    c = browser(app)
+    r = c.post("/api/login", json={"name": name, "password": password})
+    assert r.status_code == 200, r.text
+    return c

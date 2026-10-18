@@ -19,9 +19,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: python -m pip install -e ".[dev,agent]"
-      - run: ruff check src tests && ruff format --check src tests
+      - run: python -m pip install -e ".[dev]"
+      - run: ruff check src tests skills && ruff format --check src tests skills
       - run: python -m mypy
+      - run: agentskills validate skills/aegisq-pq-scan
       - run: python -m pytest --cov --cov-report=term-missing
 
   # Native Windows and macOS: pip install + the full unit suite, no Docker.
@@ -36,13 +37,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install -e ".[dev,agent]"
+      - run: python -m pip install -e ".[dev]"
       - run: python -m pytest -q
       - name: CLI smoke test
         run: |
           aegisq --version
           aegisq doctor
           aegisq audit verify
+          aegisq redteam
 
   integration:
     runs-on: ubuntu-latest

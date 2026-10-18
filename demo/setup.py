@@ -24,7 +24,9 @@ SSH_SERVICES = ["ssh-legacy"]
 
 
 def _name(cn: str) -> x509.Name:
-    return x509.Name([x509.NameAttribute(NameOID.ORGANIZATION_NAME, "AegisQ Demo"), x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+    return x509.Name(
+        [x509.NameAttribute(NameOID.ORGANIZATION_NAME, "AegisQ Demo"), x509.NameAttribute(NameOID.COMMON_NAME, cn)]
+    )
 
 
 def make_certs(out: Path) -> None:
@@ -60,7 +62,9 @@ def make_certs(out: Path) -> None:
         .sign(ca_key, hashes.SHA256())
     )
     (out / "ca.crt").write_bytes(ca.public_bytes(serialization.Encoding.PEM))
-    (out / "server.crt").write_bytes(cert.public_bytes(serialization.Encoding.PEM) + ca.public_bytes(serialization.Encoding.PEM))
+    (out / "server.crt").write_bytes(
+        cert.public_bytes(serialization.Encoding.PEM) + ca.public_bytes(serialization.Encoding.PEM)
+    )
     key_path = out / "server.key"
     key_path.write_bytes(
         key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
@@ -74,9 +78,12 @@ def main() -> None:
     parser.add_argument("--if-missing", action="store_true", help="do nothing if the fleet is already set up")
     args = parser.parse_args()
     fleet = HERE / "fleet"
-    if args.if_missing and (fleet / "certs" / "server.crt").exists() and all(
-        (fleet / svc / "conf.d" / "site.conf").exists() for svc in SERVICES
-    ) and all((fleet / svc / "sshd" / "sshd_config").exists() for svc in SSH_SERVICES):
+    if (
+        args.if_missing
+        and (fleet / "certs" / "server.crt").exists()
+        and all((fleet / svc / "conf.d" / "site.conf").exists() for svc in SERVICES)
+        and all((fleet / svc / "sshd" / "sshd_config").exists() for svc in SSH_SERVICES)
+    ):
         print(f"demo fleet already set up in {fleet}")
         return
     for svc in SERVICES:

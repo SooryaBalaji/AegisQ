@@ -1,14 +1,14 @@
-// Token guessing under load. Pass criteria:
-//   * no guessed token is ever accepted
-//   * failures are throttled (429) after the limit (20 per client per 5 minutes)
+// Password guessing under load. Pass criteria:
+//   * no guessed password is ever accepted
+//   * failures are throttled (429) after the limit (20 per client and per user name per 5 minutes)
 //   * throttled replies stay cheap, and the unauthenticated health check keeps answering
 // Note: the throttle is per client address, so legitimate users behind the same address are also
-// blocked for the window. That is deliberate: letting valid tokens through while blocked would tell a
+// blocked for the window. That is deliberate: letting valid passwords through while blocked would tell a
 // blocked attacker which guess was right (200 vs 429) and make the throttle pointless.
 import http from "k6/http";
 import { check } from "k6";
 import { Counter } from "k6/metrics";
-import { BASE } from "./lib.js";
+import { BASE, JSON_HEADERS, USERS } from "./lib.js";
 
 const DURATION = __ENV.SMOKE === "1" ? "5s" : "20s";
 const rejected = new Counter("guesses_rejected_401");
@@ -31,9 +31,9 @@ export const options = {
 };
 
 export function guess() {
-  const token = `guess-${__VU}-${__ITER}-${Math.random().toString(36).slice(2)}`;
-  const res = http.get(`${BASE}/api/me`, {
-    headers: { Authorization: `Bearer ${token}` },
+  const password = `guess-${__VU}-${__ITER}-${Math.random().toString(36).slice(2)}`;
+  const res = http.post(`${BASE}/api/login`, JSON.stringify({ name: USERS[0].name, password }), {
+    headers: JSON_HEADERS,
     tags: { endpoint: "guess" },
     responseCallback: http.expectedStatuses(401, 429),
   });

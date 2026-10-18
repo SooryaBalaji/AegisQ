@@ -1,0 +1,40 @@
+{
+  "scan_id": "fd1059bab1724bab9c87c73caacc8a00",
+  "started_at": "2026-10-04T01:41:18.604637Z",
+  "finished_at": "2026-10-04T01:41:18.647116Z",
+  "tool_version": "1.0.0",
+  "backend": "tls=native,ssh=native",
+  "results": [
+    {
+      "service": {
+        "name": "mail.example.com-443",
+        "host": "mail.example.com",
+        "port": 443,
+        "protocol": "tls",
+        "sni": null,
+        "data_category": "unknown",
+        "owner": null,
+        "tags": [],
+        "retention_years": null,
+        "migration_years": null,
+        "stack": {},
+        "managed": null
+      },
+      "status": "unreachable",
+      "backend": "native",
+      "scanned_at": "2026-10-04T01:41:18.647116Z",
+      "duration_ms": 0.0,
+      "resolved_ip": null,
+      "tls": null,
+      "ssh": null,
+      "errors": [
+        "DNS resolution failed: [Errno 11001] getaddrinfo failed"
+      ],
+      "findings": []
+    }
+  ],
+  "environment": {
+    "python": "3.11.9",
+    "platform": "Windows-10"
+  }
+}

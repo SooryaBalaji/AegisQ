@@ -4,14 +4,14 @@ import http from "k6/http";
 import { check } from "k6";
 import { Counter } from "k6/metrics";
 import exec from "k6/execution";
-import { BASE, SMOKE, TOKENS, auth } from "./lib.js";
+import { BASE, SMOKE, USERS, auth, signIn } from "./lib.js";
 
 const IDS = JSON.parse(open(__ENV.APPROVALS_FILE || "./out/approvals.json"));
 const wins = new Counter("decisions_won");
 const conflicts = new Counter("decisions_conflict");
 const unexpected = new Counter("decisions_unexpected");
 
-if (TOKENS.length < 2) throw new Error("approvals.js needs at least two tokens (two approvers)");
+if (USERS.length < 2) throw new Error("approvals.js needs at least two users (two approvers)");
 
 export const options = {
   scenarios: {
@@ -30,11 +30,15 @@ export const options = {
   },
 };
 
-export default function () {
+export function setup() {
+  return { sessions: signIn() };
+}
+
+export default function (data) {
   const i = exec.scenario.iterationInTest;
   const id = IDS[Math.floor(i / 2)];
   const who = i % 2; // the two halves of each pair use different approvers
-  const params = auth(who);
+  const params = auth(data.sessions, who);
   params.headers["Content-Type"] = "application/json";
   params.tags = { endpoint: "decision" };
   const res = http.post(
@@ -48,7 +52,7 @@ export default function () {
   check(res, { "decision: 200 or 409": (r) => r.status === 200 || r.status === 409 });
 }
 
-export function teardown() {
-  const res = http.get(`${BASE}/api/approvals?status=pending`, auth(0));
+export function teardown(data) {
+  const res = http.get(`${BASE}/api/approvals?status=pending`, auth(data.sessions, 0));
   check(res, { "no approval left pending": (r) => r.status === 200 && r.json().length === 0 });
 }

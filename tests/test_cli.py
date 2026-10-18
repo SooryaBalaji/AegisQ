@@ -141,13 +141,13 @@ def test_env_file_loading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
 def test_doctor_reads_env_file(runner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(os, "environ", os.environ.copy())  # the CLI loads the file into os.environ
     env = tmp_path / "my.env"
-    env.write_text("GEMINI_API_KEY=test-key\nAEGISQ_API_TOKENS=me:0123456789abcdefgh\n", encoding="utf-8")
+    env.write_text("GEMINI_API_KEY=test-key\nAEGISQ_LLM_MODEL=gemma-4-26b-a4b-it\n", encoding="utf-8")
     monkeypatch.setenv("AEGISQ_ENV_FILE", str(env))
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("AEGISQ_API_TOKENS", raising=False)
+    monkeypatch.delenv("AEGISQ_LLM_MODEL", raising=False)
     r = runner("doctor")
     assert r.exit_code == 0
     assert f"{env} (2 variables loaded)" in r.output
-    assert "gemma-4-31b-it @ generativelanguage.googleapis.com" in r.output
-    assert "1 configured" in r.output
+    assert "gemma-4-26b-a4b-it @ generativelanguage.googleapis.com" in r.output
+    assert "none yet" in r.output
     assert "\nno  " not in r.output  # optional tools are never shown as failures

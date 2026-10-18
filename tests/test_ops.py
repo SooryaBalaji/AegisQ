@@ -4,17 +4,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
-from fastapi.testclient import TestClient
 
 from aegisq.models import ScanReport, ServiceScan, ServiceTarget, Status
 from aegisq.ops import Ops, ScheduleStore, check_webhook_url, mask
 from aegisq.web.app import create_app
-
-ADMIN, VIEWER = "root-token-0123456789", "viewer-token-0123456789"
-
-
-def hdr(t: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {t}"}
+from conftest import add_user, signed_in
 
 
 @pytest.fixture
@@ -135,6 +129,10 @@ def test_approval_and_job_alerts(ws, cfg, webhook) -> None:
     ops.watch_approvals()
     texts = [g["body"]["text"] for g in webhook["got"]]
     assert len(texts) == 1 and "bastion" in texts[0] and "someone else must approve" in texts[0]
+    quick = ws.approvals.create("edge", "p2", "d", "h" * 64, "- a; + b", "agent", 60)
+    ws.approvals.decide(quick.id, True, "priya")  # decided before the next tick: still reported
+    ops.watch_approvals()
+    assert "edge was requested and is already approved" in webhook["got"][-1]["body"]["text"]
     ops.after_job({"job": "j", "kind": "scan", "status": "failed", "exit_code": 1})
     assert webhook["got"][-1]["body"]["event"] == "job_failed"
 
@@ -152,27 +150,27 @@ def test_audit_tamper_alert(ws, cfg, webhook) -> None:
 
 
 def test_schedule_and_alert_api(cfg, ws, tmp_path, webhook) -> None:
-    tokens = {ADMIN: "root", VIEWER: "vic:viewer"}
-    bare = TestClient(create_app(cfg, tokens=tokens))
-    assert bare.post("/api/schedules", json={"every_minutes": 60}, headers=hdr(ADMIN)).status_code == 409
+    add_user(cfg, "root")
+    add_user(cfg, "vic", "viewer")
+    bare = signed_in(create_app(cfg), "root")
+    assert bare.post("/api/schedules", json={"every_minutes": 60}).status_code == 409
     inv = tmp_path / "inv.yaml"
     inv.write_text("services: [{name: a, host: 127.0.0.1, port: 9}]\n")
-    c = TestClient(create_app(cfg, inventory=str(inv), tokens=tokens))
-    assert c.get("/api/capabilities", headers=hdr(ADMIN)).json()["schedules"] is True
-    assert c.post("/api/schedules", json={"every_minutes": 60}, headers=hdr(VIEWER)).status_code == 403
-    assert c.post("/api/schedules", json={"every_minutes": 1}, headers=hdr(ADMIN)).status_code == 422
-    s = c.post("/api/schedules", json={"every_minutes": 360}, headers=hdr(ADMIN)).json()
-    assert [x["id"] for x in c.get("/api/schedules", headers=hdr(VIEWER)).json()] == [s["id"]]
-    assert c.patch(f"/api/schedules/{s['id']}", json={"enabled": False}, headers=hdr(ADMIN)).json()["enabled"] == 0
-    assert c.delete(f"/api/schedules/{s['id']}", headers=hdr(ADMIN)).status_code == 200
-    assert c.get("/api/alerts", headers=hdr(VIEWER)).status_code == 403
-    assert c.post("/api/alerts", json={"url": "http://evil.example/h"}, headers=hdr(ADMIN)).status_code == 422
-    assert (
-        c.post("/api/alerts", json={"url": webhook["url"], "events": ["bogus"]}, headers=hdr(ADMIN)).status_code == 422
-    )
-    a = c.post("/api/alerts", json={"url": webhook["url"]}, headers=hdr(ADMIN)).json()
+    app = create_app(cfg, inventory=str(inv))
+    c, viewer = signed_in(app, "root"), signed_in(app, "vic")
+    assert c.get("/api/capabilities").json()["schedules"] is True
+    assert viewer.post("/api/schedules", json={"every_minutes": 60}).status_code == 403
+    assert c.post("/api/schedules", json={"every_minutes": 1}).status_code == 422
+    s = c.post("/api/schedules", json={"every_minutes": 360}).json()
+    assert [x["id"] for x in viewer.get("/api/schedules").json()] == [s["id"]]
+    assert c.patch(f"/api/schedules/{s['id']}", json={"enabled": False}).json()["enabled"] == 0
+    assert c.delete(f"/api/schedules/{s['id']}").status_code == 200
+    assert viewer.get("/api/alerts").status_code == 403
+    assert c.post("/api/alerts", json={"url": "http://evil.example/h"}).status_code == 422
+    assert c.post("/api/alerts", json={"url": webhook["url"], "events": ["bogus"]}).status_code == 422
+    a = c.post("/api/alerts", json={"url": webhook["url"]}).json()
     assert sorted(a["events"]) == ["approval", "audit", "exposure", "job_failed"]
-    assert c.post("/api/alerts/test", headers=hdr(ADMIN)).json()[0]["ok"] is True
+    assert c.post("/api/alerts/test").json()[0]["ok"] is True
     assert "test alert from root" in webhook["got"][0]["body"]["text"]
-    assert c.delete(f"/api/alerts/{a['id']}", headers=hdr(ADMIN)).status_code == 200
-    assert c.get("/api/alerts", headers=hdr(ADMIN)).json()["alerts"] == []
+    assert c.delete(f"/api/alerts/{a['id']}").status_code == 200
+    assert c.get("/api/alerts").json()["alerts"] == []

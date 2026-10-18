@@ -1,0 +1,5 @@
+{
+  "app-legacy": {
+    "openssl": "3.0.11"
+  }
+}

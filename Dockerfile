@@ -9,10 +9,10 @@ RUN apt-get update \
 FROM base AS build
 COPY pyproject.toml README.md /src/
 COPY src /src/src
-ARG EXTRAS=agent
+ARG EXTRAS=""
 RUN python3 -m venv /opt/aegisq \
  && /opt/aegisq/bin/pip install --upgrade pip \
- && /opt/aegisq/bin/pip install "/src[${EXTRAS}]"
+ && /opt/aegisq/bin/pip install "/src${EXTRAS:+[$EXTRAS]}"
 
 # Demo / Docker Desktop image: adds the docker CLI so the agent can run `nginx -t` and reloads in the demo
 # containers through the mounted Docker socket. Runs as root because the socket is root-owned.
@@ -31,7 +31,7 @@ COPY pyproject.toml README.md /src/
 COPY src /src/src
 COPY tests /src/tests
 COPY aegisq.example.yaml /src/
-RUN /opt/aegisq/bin/pip install -e "/src[dev,agent]"
+RUN /opt/aegisq/bin/pip install -e "/src[dev]"
 WORKDIR /src
 ENTRYPOINT ["python3", "-m", "pytest"]
 CMD []

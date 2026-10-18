@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AegisQ Migration Report</title>
+<style>
+:root { --bg:#fbfaf7; --fg:#1d1d1b; --muted:#6b6a65; --line:#e3e1da; --ok:#1f7a4d; --bad:#b3261e; --warn:#a15c00; --card:#fff; }
+@media (prefers-color-scheme: dark) { :root { --bg:#161614; --fg:#ecebe6; --muted:#a3a29b; --line:#33322e; --ok:#5fc48f; --bad:#ff8a80; --warn:#f0b35a; --card:#1e1e1b; } }
+body { background:var(--bg); color:var(--fg); font:15px/1.55 system-ui, -apple-system, Segoe UI, sans-serif; margin:0; padding:24px 16px 64px; }
+main { max-width:1000px; margin:0 auto; }
+h1 { font-size:28px; margin:0 0 4px; } h2 { margin-top:36px; font-size:20px; border-bottom:1px solid var(--line); padding-bottom:6px; }
+.muted { color:var(--muted); } .ok { color:var(--ok); font-weight:600; } .bad { color:var(--bad); font-weight:600; }
+.tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:16px 0; }
+.tile { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; }
+.tile b { display:block; font-size:24px; }
+.scroll { overflow-x:auto; } table { border-collapse:collapse; width:100%; font-size:14px; }
+th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { color:var(--muted); font-weight:600; }
+.sev-critical { color:var(--bad); font-weight:700; } .sev-high { color:var(--bad); } .sev-medium { color:var(--warn); } .sev-none { color:var(--ok); }
+code { font-size:13px; } ul { padding-left:20px; }
+</style>
+</head>
+<body><main>
+<h1>AegisQ post-quantum migration report</h1>
+<div class="muted">Generated 2026-10-15 05:50 UTC · AegisQ 1.0.0 · Audit log
+<span class="ok">intact</span> (264 entries, HMAC-keyed chain)</div>
+
+<div class="tiles">
+  <div class="tile"><b>7</b>services</div>
+  <div class="tile"><b class="ok">0.0%</b>post-quantum ready</div>
+  <div class="tile"><b class="bad">0</b>at risk at Z = 10.0</div>
+  <div class="tile"><b>0</b>classical / old TLS</div>
+  <div class="tile"><b>0</b>plaintext HTTP</div>
+</div>
+
+<h2>Risk ranking (margin = X + Y − Z, Z = 10.0)</h2>
+<div class="scroll"><table>
+<tr><th>#</th><th>Service</th><th>Status</th><th>Data</th><th>X</th><th>Y</th><th>Margin</th><th>Severity</th><th>Why Y</th></tr>
+<tr><td>1</td><td>app-modern</td><td>unreachable</td><td>health</td><td>25.0</td><td>0.0</td>
+<td>+0.0</td><td class="sev-unknown">unknown</td><td class="muted">not scanned: ConnectionRefusedError: [WinError 1225] The remote computer refused the network connection</td></tr>
+<tr><td>2</td><td>ssh-legacy</td><td>unreachable</td><td>health</td><td>25.0</td><td>0.0</td>
+<td>+0.0</td><td class="sev-unknown">unknown</td><td class="muted">not scanned: [WinError 1225] The remote computer refused the network connection</td></tr>
+<tr><td>3</td><td>app-tls12</td><td>unreachable</td><td>pii</td><td>10.0</td><td>0.0</td>
+<td>+0.0</td><td class="sev-unknown">unknown</td><td class="muted">not scanned: ConnectionRefusedError: [WinError 1225] The remote computer refused the network connection</td></tr>
+<tr><td>4</td><td>app-legacy</td><td>unreachable</td><td>payments</td><td>7.0</td><td>0.0</td>
+<td>+0.0</td><td class="sev-unknown">unknown</td><td class="muted">not scanned: ConnectionRefusedError: [WinError 1225] The remote computer refused the network connection</td></tr>
+<tr><td>5</td><td>app-plain</td><td>unreachable</td><td>internal</td><td>3.0</td><td>0.0</td>
+<td>+0.0</td><td class="sev-unknown">unknown</td><td class="muted">not scanned: ConnectionRefusedError: [WinError 1225] The remote computer refused the network connection</td></tr>
+<tr><td>6</td><td>ssh-pq</td><td>unreachable</td><td>internal</td><td>3.0</td><td>0.0</td>
+<td>+0.0</td><td class="sev-unknown">unknown</td><td class="muted">not scanned: [WinError 1225] The remote computer refused the network connection</td></tr>
+<tr><td>7</td><td>app-ready</td><td>unreachable</td><td>marketing</td><td>1.0</td><td>0.0</td>
+<td>+0.0</td><td class="sev-unknown">unknown</td><td class="muted">not scanned: ConnectionRefusedError: [WinError 1225] The remote computer refused the network connection</td></tr>
+</table></div>
+
+<h2>Migration actions</h2>
+<h3>app-modern <span class="muted">— fixed</span></h3>
+<ul><li><code>2026-10-04 01:18:32</code> <span class="muted">(agent)</span> Proposed: `- ssl_ecdh_curve X25519:prime256v1;` `+ ssl_ecdh_curve X25519MLKEM768:X25519:prime256v1;` (branch aegisq/app-modern/9aaa3d471e)</li><li><code>2026-10-04 01:25:58</code> <span class="muted">(agent)</span> Approval approved by soorya</li><li><code>2026-10-04 01:26:30</code> <span class="muted">(agent)</span> Applied; config test passed; reloaded</li><li><code>2026-10-04 01:27:11</code> <span class="muted">(agent)</span> Verified: negotiated X25519MLKEM768 (1120-byte server share); health HTTP 200</li><li><code>2026-10-04 02:12:28</code> <span class="muted">(agent)</span> Proposed: `- ssl_ecdh_curve X25519:prime256v1;` `+ ssl_ecdh_curve X25519MLKEM768:X25519:prime256v1;` (branch aegisq/app-modern/29ff227d7e)</li><li><code>2026-10-04 02:13:10</code> <span class="muted">(agent)</span> Approval approved by soorya</li><li><code>2026-10-04 02:13:35</code> <span class="muted">(agent)</span> Applied; config test passed; reloaded</li><li><code>2026-10-04 02:14:14</code> <span class="muted">(agent)</span> Verified: negotiated X25519MLKEM768 (1120-byte server share); health HTTP 200</li></ul>
+<h3>app-tls12</h3>
+<ul><li><code>2026-10-04 01:28:12</code> <span class="muted">(agent)</span> Proposed: `- ssl_protocols TLSv1.2;` `- ssl_ecdh_curve X25519:prime256v1;` `+ ssl_protocols TLSv1.2 TLSv1.3;` `+ ssl_ecdh_curve X25519MLKEM768:X25519:prime256v1;` (branch aegisq/app-tls12/69eeed2d27)</li><li><code>2026-10-04 01:43:41</code> <span class="muted">(agent)</span> Proposed: `- ssl_protocols TLSv1.2;` `- ssl_ecdh_curve X25519:prime256v1;` `+ ssl_protocols TLSv1.2 TLSv1.3;` `+ ssl_ecdh_curve X25519MLKEM768:X25519:prime256v1;` (branch aegisq/app-tls12/e0407e51a8)</li><li><code>2026-10-04 02:17:13</code> <span class="muted">(agent)</span> Proposed: `- ssl_protocols TLSv1.2;` `- ssl_ecdh_curve X25519:prime256v1;` `+ ssl_protocols TLSv1.2 TLSv1.3;` `+ ssl_ecdh_curve X25519MLKEM768:X25519:prime256v1;` (branch aegisq/app-tls12/42a4a6596e)</li><li><code>2026-10-04 02:17:57</code> <span class="muted">(agent)</span> Approval approved by soorya</li><li><code>2026-10-04 02:18:34</code> <span class="muted">(agent)</span> Applied; config test passed; reloaded</li></ul>
+<h3>app-legacy <span class="muted">— failed (rolled back)</span></h3>
+<ul><li><code>2026-10-04 01:45:25</code> <span class="muted">(agent)</span> Proposed: `- ssl_ecdh_curve X25519:prime256v1;` `+ ssl_ecdh_curve X25519MLKEM768:X25519:prime256v1;` (branch aegisq/app-legacy/494fdad3b8)</li><li><code>2026-10-04 01:49:08</code> <span class="muted">(agent)</span> Approval approved by soorya</li><li><code>2026-10-04 01:49:44</code> <span class="muted">(agent)</span> Config test FAILED, previous config restored. Root cause: nginx is linked against OpenSSL 3.0.11, which has no ML-KEM. X25519MLKEM768 was added in OpenSSL 3.5, so the TLS library rejected the group list. Recommendation: Upgrade this server to an nginx build linked against OpenSSL 3.5 or later (for example nginx 1.29 on Alpine 3.22+, Ubuntu 26.04 or Debian 13), then re-run AegisQ. No config change can fix this on the current library.</li><li><code>2026-10-04 02:56:46</code> <span class="muted">(agent)</span> Proposed: `- ssl_ecdh_curve X25519:prime256v1;` `+ ssl_ecdh_curve X25519MLKEM768:X25519:prime256v1;` (branch aegisq/app-legacy/0e6b1ba0a7)</li><li><code>2026-10-04 02:58:01</code> <span class="muted">(agent)</span> Approval approved by soorya</li><li><code>2026-10-04 02:58:29</code> <span class="muted">(agent)</span> Config test FAILED, previous config restored. Root cause: nginx is linked against OpenSSL 3.0.11, which has no ML-KEM. X25519MLKEM768 was added in OpenSSL 3.5, so the TLS library rejected the group list. Recommendation: Upgrade this server to an nginx build linked against OpenSSL 3.5 or later (for example nginx 1.29 on Alpine 3.22+, Ubuntu 26.04 or Debian 13), then re-run AegisQ. No config change can fix this on the current library.</li></ul>
+
+
+
+<h2>Handshake cost (measured)</h2>
+<div class="scroll"><table><tr><th>Setting</th><th>n</th><th>p50 ms</th><th>p99 ms</th><th>Failures</th></tr>
+<tr><td>X25519MLKEM768 (to ServerHello, native)</td><td>200</td><td>26.773</td><td>48.412</td><td>0</td></tr><tr><td>x25519 (to ServerHello, native)</td><td>200</td><td>25.879</td><td>74.338</td><td>0</td></tr></table></div><p class="muted">Measured against the target as configured; on localhost there is no network delay, so these numbers are computation cost only. Real-world latency also depends on round trips and packet loss.</p>
+
+<h2>Where the Z assumption comes from</h2>
+<div class="scroll"><table><tr><th>Estimate</th><th>Target</th><th>Logical qubits</th><th>Physical qubits</th><th>Runtime</th></tr>
+<tr><td>Google Quantum AI, March 2026</td><td>256-bit elliptic curve</td><td>≤ 1,200 (≤ 90M Toffoli) or ≤ 1,450 (≤ 70M Toffoli)</td><td>Under 500,000 superconducting</td><td>Minutes</td></tr><tr><td>IonQ, 2026</td><td>256-bit elliptic curve</td><td>1,457 (39M Toffoli)</td><td>About 20,000 trapped-ion</td><td>About 26 days per attempt</td></tr><tr><td>Gidney, May 2025</td><td>RSA-2048</td><td>n/a</td><td>Under 1,000,000 superconducting</td><td>Under a week</td></tr></table></div>
+<p class="muted">These estimates target secp256k1; X25519 uses Curve25519, a different curve of the same size, so they are a close proxy rather than an exact figure. Current IBM processors have ~156 physical qubits and no error-corrected logical qubits at this scale: the threat is future, but traffic recorded today is already exposed.</p>
+</main></body></html>

@@ -1,0 +1,13 @@
+{
+  "statuses": {
+    "app-modern": "unreachable",
+    "app-legacy": "unreachable",
+    "app-tls12": "unreachable",
+    "app-ready": "unreachable",
+    "app-plain": "unreachable",
+    "ssh-pq": "unreachable",
+    "ssh-legacy": "unreachable"
+  },
+  "exposed": [],
+  "scan_id": "aed66983f6f34124abb8bc1dcac3b640"
+}

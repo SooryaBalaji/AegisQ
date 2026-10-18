@@ -12,16 +12,17 @@ x-nginx: &nginx
     retries: 3
 
 x-aegisq: &aegisq
-  build: { context: .., target: demo, args: { EXTRAS: "agent" } }
+  build: { context: .., target: demo }
   image: aegisq:demo
   working_dir: /demo
   environment:
     AEGISQ_HOME: /var/lib/aegisq/workspace
-    # Dashboard login. Override in a .env file next to this compose file: AEGISQ_API_TOKENS=you:<16+ chars>
-    AEGISQ_API_TOKENS: ${AEGISQ_API_TOKENS:-admin:aegisq-demo-token-change-me}
-    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}        # --planner claude
-    GEMINI_API_KEY: ${GEMINI_API_KEY:-}              # --planner local with Gemma 4 on the Gemini API
-    # --planner local with Ollama/LM Studio on the host: AEGISQ_LLM_BASE_URL=http://host.docker.internal:11434/v1
+    # First admin, created once. Change it in a .env file next to this compose file (12+ character password),
+    # then add people in Settings > Users.
+    AEGISQ_ADMIN_USER: ${AEGISQ_ADMIN_USER:-admin}
+    AEGISQ_ADMIN_PASSWORD: ${AEGISQ_ADMIN_PASSWORD:-aegisq-demo-change-me}
+    GEMINI_API_KEY: ${GEMINI_API_KEY:-}              # --planner gemma: Gemma 4 on Google's Gemini API
+    # --planner gemma with Gemma 4 in Ollama on the host: AEGISQ_LLM_BASE_URL=http://host.docker.internal:11434/v1
     AEGISQ_LLM_BASE_URL: ${AEGISQ_LLM_BASE_URL:-}
     AEGISQ_LLM_MODEL: ${AEGISQ_LLM_MODEL:-}
     AEGISQ_LLM_API_KEY: ${AEGISQ_LLM_API_KEY:-}
@@ -117,7 +118,7 @@ services:
   tests:                 # docker compose -f demo/docker-compose.yml --profile test run --rm tests [-m integration]
     <<: *aegisq
     profiles: ["test"]
-    build: { context: .., target: test, args: { EXTRAS: "agent" } }
+    build: { context: .., target: test }
     image: aegisq:test
     container_name: aegisq-tests
     entrypoint: ["python3", "-m", "pytest"]

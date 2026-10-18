@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "AegisQ contributors" }]
-keywords = ["post-quantum", "ml-kem", "tls", "ssh", "cbom", "cyclonedx", "security"]
+keywords = ["post-quantum", "ml-kem", "tls", "ssh", "cbom", "cyclonedx", "security", "gemma", "agent-skills"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Security :: Cryptography",
@@ -31,7 +31,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-agent = ["anthropic>=0.70"]
 dev = [
   "pytest>=8",
   "pytest-asyncio>=0.23",
@@ -39,9 +38,9 @@ dev = [
   "httpx>=0.27",
   "ruff==0.16.10",  # pinned: new ruff releases add rules and would turn CI red without code changes
   "mypy>=1.10",
+  "skills-ref>=0.1.1; python_version >= '3.11'",  # validates skills/ against the Agent Skills specification
   "types-PyYAML",
 ]
-all = ["aegisq[agent]"]
 
 [project.scripts]
 aegisq = "aegisq.cli:main"

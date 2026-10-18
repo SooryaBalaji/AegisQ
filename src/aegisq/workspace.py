@@ -19,7 +19,7 @@ from typing import Any
 from aegisq.audit import AuditLog
 from aegisq.models import ScanReport
 
-RESERVED_APPROVERS = {"agent", "aegisq", "claude", "system", "auto"}
+RESERVED_APPROVERS = {"agent", "aegisq", "gemma", "system", "auto", "scheduler"}
 
 
 def atomic_write(path: Path, data: bytes | str, mode: int = 0o644) -> None:
@@ -104,6 +104,13 @@ class Sqlite:
         except BaseException:
             conn.execute("ROLLBACK")
             raise
+
+    def close(self) -> None:
+        """Close this thread's connection (Windows cannot delete an open database file)."""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()
+            self._local.conn = None
 
 
 class ApprovalStore(Sqlite):

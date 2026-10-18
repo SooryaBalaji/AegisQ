@@ -366,6 +366,7 @@ def test_old_postfix_refused_before_anything_changes(ws, cfg, fake_server, monke
     summary = run_rules(ws, cfg, rep)
     assert summary.outcomes["svc"] == "failed" and path.read_text() == POSTFIX
     assert "Postfix 3.10 or later" in " ".join(summary.notes["svc"])
+    assert ws.load_json("facts.json")["svc"]["blocker"] == "Postfix 3.8.6"
 
 
 def test_mail_server_verify_uses_classical_handshake(ws, cfg, fake_server, monkeypatch) -> None:

@@ -1,30 +1,22 @@
-import os
+import time
 
 import pytest
 from click.testing import CliRunner
-from fastapi.testclient import TestClient
 
 from aegisq.cli import main
-from aegisq.config import api_tokens
-from aegisq.users import UserStore, can, env_users
+from aegisq.users import UserStore, can, check_password, hash_password
 from aegisq.web.app import create_app
+from conftest import PASSWORD, add_user, signed_in
 
-ADMIN, VIEWER, OPERATOR, APPROVER = (
-    "root-token-0123456789",
-    "viewer-token-0123456789",
-    "operator-token-0123456789",
-    "approver-token-0123456789",
-)
-
-
-def hdr(token: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}"}
+ROLES = {"root": "admin", "vic": "viewer", "olga": "operator", "abe": "approver"}
 
 
 @pytest.fixture
 def team(cfg, ws):
-    tokens = {ADMIN: "root", VIEWER: "vic:viewer", OPERATOR: "olga:operator", APPROVER: "abe:approver"}
-    return TestClient(create_app(cfg, tokens=tokens))
+    for name, role in ROLES.items():
+        add_user(cfg, name, role)
+    app = create_app(cfg)
+    return {name: signed_in(app, name) for name in ROLES}
 
 
 def test_role_permissions() -> None:
@@ -34,101 +26,119 @@ def test_role_permissions() -> None:
     assert can("viewer", "view") and not can("viewer", "run") and not can("nobody", "view")
 
 
-def test_api_tokens_roles(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AEGISQ_API_TOKENS", "alice:a-token-0123456789ab,bob:b-token-0123456789ab:approver")
-    toks = api_tokens()
-    assert toks == {"a-token-0123456789ab": "alice", "b-token-0123456789ab": "bob:approver"}
-    assert {u.name: u.role for u in env_users(toks).values()} == {"alice": "admin", "bob": "approver"}
-    monkeypatch.setenv("AEGISQ_API_TOKENS", "bob:b-token-0123456789ab:root")
-    with pytest.raises(ValueError, match="role"):
-        api_tokens()
-
-
-def test_user_store_keeps_only_hashes(ws) -> None:
+def test_passwords_are_only_stored_as_scrypt_hashes(ws) -> None:
     store = UserStore(ws.home / "state.db")
-    token = store.add("carol", "approver", created_by="root")
-    assert store.by_token(token).role == "approver" and store.by_token("nope-token-0123456789") is None
-    assert token.encode() not in (ws.home / "state.db").read_bytes()
+    store.add("carol", "approver", "carol's long password", created_by="root")
+    assert b"carol's long password" not in (ws.home / "state.db").read_bytes()
+    assert store.verify("carol", "carol's long password").role == "approver"
+    assert store.verify("carol", "wrong") is None and store.verify("nobody", "carol's long password") is None
+    h = hash_password("x" * 12)
+    assert h.startswith("scrypt$") and check_password("x" * 12, h) and not check_password("y" * 12, h)
+    assert not check_password("x", "garbage")
     with pytest.raises(ValueError, match="exists"):
-        store.add("carol", "viewer")
+        store.add("carol", "viewer", PASSWORD)
     with pytest.raises(ValueError, match="reserved"):
-        store.add("agent", "admin")
-    new = store.rotate("carol")
-    assert store.by_token(token) is None and store.by_token(new).name == "carol"
+        store.add("agent", "admin", PASSWORD)
+    with pytest.raises(ValueError, match="12 characters"):
+        store.add("dave", "admin", "short")
+    with pytest.raises(ValueError, match="user name"):
+        store.add("dave-the-admin", "admin", "Dave-The-Admin")
+    sid = store.start_session("carol")
+    assert store.session_user(sid).name == "carol"
     store.set_role("carol", "viewer")
-    assert store.by_token(new).role == "viewer"
+    assert store.session_user(sid).role == "viewer"  # role changes apply to live sessions
+    assert store.session_user(sid, now=time.time() + 13 * 3600) is None  # idle sessions expire
+    sid = store.start_session("carol")
     store.remove("carol")
-    assert store.by_token(new) is None
+    assert store.session_user(sid) is None
+
+
+def test_old_token_users_keep_their_roles(ws) -> None:
+    import sqlite3
+
+    db = ws.home / "state.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(db)
+    con.execute(
+        "CREATE TABLE users (name TEXT PRIMARY KEY, role TEXT NOT NULL, token_sha256 TEXT NOT NULL UNIQUE, "
+        "created_at REAL NOT NULL, created_by TEXT)"
+    )
+    con.execute("INSERT INTO users VALUES ('priya','approver','abc',1.0,'root')")
+    con.commit()
+    con.close()
+    store = UserStore(db)
+    u = store.get("priya")
+    assert u.role == "approver" and not u.has_password
+    assert store.verify("priya", "") is None
+    store.set_password("priya", PASSWORD)
+    assert store.verify("priya", PASSWORD).name == "priya"
 
 
 def test_routes_check_roles(team, ws) -> None:
-    roles = {t: team.get("/api/me", headers=hdr(t)).json()["role"] for t in (ADMIN, VIEWER, OPERATOR, APPROVER)}
-    assert roles == {ADMIN: "admin", VIEWER: "viewer", OPERATOR: "operator", APPROVER: "approver"}
-    for t in (ADMIN, VIEWER, OPERATOR, APPROVER):
-        assert team.get("/api/overview", headers=hdr(t)).status_code == 200
+    assert {n: c.get("/api/me").json()["role"] for n, c in team.items()} == ROLES
+    for c in team.values():
+        assert c.get("/api/overview").status_code == 200
     job = {"kind": "scan", "targets": "a.example"}
-    assert team.post("/api/jobs", json=job, headers=hdr(VIEWER)).status_code == 403
-    assert team.post("/api/jobs", json=job, headers=hdr(APPROVER)).status_code == 403
-    assert team.post("/api/scan", headers=hdr(VIEWER)).status_code == 403
+    assert team["vic"].post("/api/jobs", json=job).status_code == 403
+    assert team["abe"].post("/api/jobs", json=job).status_code == 403
+    assert team["vic"].post("/api/scan").status_code == 403
     a = ws.approvals.create("svc", "p", "diff", "h" * 64, "s", "agent", 60)
-    assert team.post(f"/api/approvals/{a.id}/decision", json={"approve": True}, headers=hdr(VIEWER)).status_code == 403
-    assert (
-        team.post(f"/api/approvals/{a.id}/decision", json={"approve": True}, headers=hdr(OPERATOR)).status_code == 403
-    )
-    r = team.post(f"/api/approvals/{a.id}/decision", json={"approve": True}, headers=hdr(APPROVER))
+    assert team["vic"].post(f"/api/approvals/{a.id}/decision", json={"approve": True}).status_code == 403
+    assert team["olga"].post(f"/api/approvals/{a.id}/decision", json={"approve": True}).status_code == 403
+    r = team["abe"].post(f"/api/approvals/{a.id}/decision", json={"approve": True})
     assert r.status_code == 200 and r.json()["decided_by"] == "abe"
-    for t in (VIEWER, OPERATOR, APPROVER):
-        assert team.get("/api/users", headers=hdr(t)).status_code == 403
+    for n in ("vic", "olga", "abe"):
+        assert team[n].get("/api/users").status_code == 403
+        assert team[n].post("/api/users/root/password", json={"password": "x" * 20}).status_code == 403
 
 
-def test_admin_manages_users(team) -> None:
-    r = team.post("/api/users", json={"name": "dana", "role": "operator"}, headers=hdr(ADMIN))
-    assert r.status_code == 201
-    token = r.json()["token"]
-    assert team.get("/api/me", headers=hdr(token)).json() == {
+def test_admin_manages_users(team, cfg) -> None:
+    root = team["root"]
+    r = root.post("/api/users", json={"name": "dana", "role": "operator", "password": PASSWORD})
+    assert r.status_code == 201 and "password" not in r.text.lower().replace("has_password", "")
+    dana = signed_in(root.app, "dana")
+    assert dana.get("/api/me").json() == {
         "identity": "dana",
         "role": "operator",
         "permissions": ["run", "view"],
         "separation_of_duties": True,
     }
-    names = {u["name"]: (u["role"], u["source"]) for u in team.get("/api/users", headers=hdr(ADMIN)).json()}
-    assert names["dana"] == ("operator", "database") and names["root"] == ("admin", "environment")
-    assert team.post("/api/users", json={"name": "dana", "role": "viewer"}, headers=hdr(ADMIN)).status_code == 409
-    assert team.post("/api/users", json={"name": "x;rm", "role": "viewer"}, headers=hdr(ADMIN)).status_code == 422
-    assert team.post("/api/users", json={"name": "eve", "role": "god"}, headers=hdr(ADMIN)).status_code == 422
-    assert team.patch("/api/users/root", json={"role": "viewer"}, headers=hdr(ADMIN)).status_code == 409
-    assert team.patch("/api/users/dana", json={"role": "approver"}, headers=hdr(ADMIN)).status_code == 200
-    assert team.get("/api/me", headers=hdr(token)).json()["role"] == "approver"
-    new = team.post("/api/users/dana/token", headers=hdr(ADMIN)).json()["token"]
-    assert team.get("/api/me", headers=hdr(token)).status_code == 401
-    assert team.get("/api/me", headers=hdr(new)).status_code == 200
-    assert team.delete("/api/users/dana", headers=hdr(ADMIN)).status_code == 200
-    assert team.get("/api/me", headers=hdr(new)).status_code == 401
-    events = [e["event"] for e in team.get("/api/audit?event=user.", headers=hdr(ADMIN)).json()]
-    assert events == ["user.created", "user.role_changed", "user.token_rotated", "user.removed"]
+    names = {u["name"]: u["role"] for u in root.get("/api/users").json()}
+    assert names["dana"] == "operator" and names["root"] == "admin"
+    assert root.post("/api/users", json={"name": "dana", "role": "viewer", "password": PASSWORD}).status_code == 409
+    assert root.post("/api/users", json={"name": "x;rm", "role": "viewer", "password": PASSWORD}).status_code == 422
+    assert root.post("/api/users", json={"name": "eve", "role": "god", "password": PASSWORD}).status_code == 422
+    assert root.post("/api/users", json={"name": "eve", "role": "viewer", "password": "short"}).status_code == 422
+    assert root.patch("/api/users/dana", json={"role": "approver"}).status_code == 200
+    assert dana.get("/api/me").json()["role"] == "approver"
+    assert root.post("/api/users/dana/password", json={"password": "dana's new password"}).status_code == 200
+    assert dana.get("/api/me").status_code == 401
+    assert root.delete("/api/users/dana").status_code == 200
+    events = [e["event"] for e in root.get("/api/audit?event=user.").json()]
+    assert [e for e in events if e not in ("user.signed_in",)] == [
+        "user.created",
+        "user.role_changed",
+        "user.password_reset",
+        "user.removed",
+    ]
 
 
 def test_last_admin_cannot_be_removed(cfg, ws) -> None:
-    store = UserStore(ws.home / "state.db")
-    store.add("only", "admin")
-    token = store.rotate("only")
-    client = TestClient(create_app(cfg, tokens={}))
-    assert client.get("/api/me", headers=hdr(token)).json()["role"] == "admin"
-    assert client.delete("/api/users/only", headers=hdr(token)).status_code == 409
-    assert client.patch("/api/users/only", json={"role": "viewer"}, headers=hdr(token)).status_code == 409
+    add_user(cfg, "only")
+    client = signed_in(create_app(cfg), "only")
+    assert client.delete("/api/users/only").status_code == 409
+    assert client.patch("/api/users/only", json={"role": "viewer"}).status_code == 409
 
 
 def test_separation_of_duties(team, ws) -> None:
     a = ws.approvals.create("svc", "p", "diff", "h" * 64, "s", "agent", 60, initiated_by="abe", require_other=True)
-    r = team.post(f"/api/approvals/{a.id}/decision", json={"approve": True}, headers=hdr(APPROVER))
+    r = team["abe"].post(f"/api/approvals/{a.id}/decision", json={"approve": True})
     assert r.status_code == 403 and "another approver" in r.json()["detail"]
     assert ws.approvals.get(a.id).status == "pending"
-    r = team.post(f"/api/approvals/{a.id}/decision", json={"approve": True}, headers=hdr(ADMIN))
+    r = team["root"].post(f"/api/approvals/{a.id}/decision", json={"approve": True})
     assert r.status_code == 200 and r.json()["decided_by"] == "root" and r.json()["initiated_by"] == "abe"
     b = ws.approvals.create("svc", "p2", "diff", "h" * 64, "s", "agent", 60, initiated_by="abe", require_other=True)
-    assert (
-        team.post(f"/api/approvals/{b.id}/decision", json={"approve": False}, headers=hdr(APPROVER)).status_code == 200
-    )
+    assert team["abe"].post(f"/api/approvals/{b.id}/decision", json={"approve": False}).status_code == 200
     c = ws.approvals.create("svc", "p3", "diff", "h" * 64, "s", "agent", 60, initiated_by="abe", require_other=False)
     assert ws.approvals.decide(c.id, True, "abe").status == "approved"
 
@@ -136,13 +146,14 @@ def test_separation_of_duties(team, ws) -> None:
 def test_migrate_job_records_the_initiator(cfg, ws, tmp_path, monkeypatch) -> None:
     inv = tmp_path / "inv.yaml"
     inv.write_text("services: [{name: a, host: 127.0.0.1, port: 9}]\n")
-    client = TestClient(create_app(cfg, inventory=str(inv), tokens={OPERATOR: "olga:operator"}))
+    add_user(cfg, "olga", "operator")
+    client = signed_in(create_app(cfg, inventory=str(inv)), "olga")
     started = []
     monkeypatch.setattr(
         "aegisq.web.jobs.JobManager.start",
         lambda self, kind, label, steps, who: started.append((steps, who)) or _Fake(),
     )
-    r = client.post("/api/jobs", json={"kind": "migrate", "planner": "rules"}, headers=hdr(OPERATOR))
+    r = client.post("/api/jobs", json={"kind": "migrate", "planner": "rules"})
     assert r.status_code == 202
     steps, who = started[0]
     assert who == "olga" and steps[0][steps[0].index("--initiator") + 1] == "olga"
@@ -154,21 +165,28 @@ class _Fake:
 
 
 @pytest.fixture
-def runner(home):
+def runner_in(home):
     r = CliRunner()
-    return lambda *args: r.invoke(main, ["--home", str(home), *args], catch_exceptions=False)
+    return lambda stdin, *args: r.invoke(main, ["--home", str(home), *args], input=stdin, catch_exceptions=False)
 
 
-def test_cli_users(runner) -> None:
-    r = runner("users", "add", "frank", "--role", "approver")
-    assert r.exit_code == 0 and "shown only once" in r.output
-    token = r.output.strip().splitlines()[-1]
-    assert len(token) >= 24 and "frank" in runner("users", "list").output
-    assert runner("users", "role", "frank", "viewer").exit_code == 0
-    assert runner("users", "add", "frank", "--role", "viewer").exit_code == 1
-    assert runner("users", "remove", "frank").exit_code == 0
-    assert runner("users", "remove", "frank").exit_code == 1
-    assert os.environ.get("AEGISQ_API_TOKENS") is None
+def test_cli_users(home, runner_in) -> None:
+    r = runner_in("frank's password\nfrank's password\n", "users", "add", "frank", "--role", "approver")
+    assert r.exit_code == 0 and "can now sign in" in r.output and "frank's password" not in r.output
+    store = UserStore(home / "state.db")
+    assert store.verify("frank", "frank's password").role == "approver"
+    assert runner_in("", "users", "add", "gus", "--role", "admin", "--password-stdin").exit_code == 1  # too short
+    assert (
+        runner_in("gus's long password\n", "users", "add", "gus", "--role", "admin", "--password-stdin").exit_code == 0
+    )
+    assert "frank" in runner_in("", "users", "list").output
+    assert runner_in("", "users", "role", "frank", "viewer").exit_code == 0
+    assert runner_in("another password\n", "users", "password", "frank", "--password-stdin").exit_code == 0
+    assert store.verify("frank", "another password") is not None
+    assert runner_in("", "users", "remove", "frank").exit_code == 0
+    assert runner_in("", "users", "remove", "frank").exit_code == 1
+    assert runner_in("", "users", "remove", "gus").exit_code == 1  # the last admin stays
+    assert runner_in("", "users", "role", "gus", "viewer").exit_code == 1
 
 
 def test_toolbox_records_the_initiator(ws, cfg, fake_nginx) -> None:

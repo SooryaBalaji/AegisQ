@@ -117,7 +117,9 @@ class JobManager:
             proc = job.proc
         if proc is not None and proc.poll() is None:
             _interrupt(proc)
-            threading.Timer(CANCEL_GRACE_S, _force_kill, args=(proc,)).start()
+            timer = threading.Timer(CANCEL_GRACE_S, _force_kill, args=(proc,))
+            timer.daemon = True  # never keeps the dashboard process alive on shutdown
+            timer.start()
 
     def _run(self, job: Job) -> None:
         code: int | None = 0

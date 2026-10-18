@@ -72,6 +72,8 @@ def test_config_merges_partial_maps(tmp_path) -> None:
     p.write_text("risk:\n  migration_years: {typo: 1}\n")
     with pytest.raises(Exception, match="unknown"):
         load_config(p)
+    p.write_text("agent:\n  model: old-hosted-model\n  local_model: gemma4\n  effort: high\n")
+    assert load_config(p).agent.model == "gemma4"  # configs from earlier versions still load
     p.write_text("nope: 1\n")
     with pytest.raises(Exception):
         load_config(p)

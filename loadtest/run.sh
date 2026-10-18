@@ -21,7 +21,8 @@ if [[ "${SMOKE:-0}" == "1" ]]; then SERVICES=${SERVICES_SMOKE:-300}; AUDIT=${AUD
 
 HOME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/aegisq-loadtest.XXXXXX")"
 rm -rf "$OUT" && mkdir -p "$OUT"
-TOKENS="alice:$(openssl rand -hex 16),bob:$(openssl rand -hex 16)"
+PW_A="$(openssl rand -hex 16)"; PW_B="$(openssl rand -hex 16)"
+USERS="alice:$PW_A,bob:$PW_B"
 
 if command -v k6 >/dev/null 2>&1; then
   K6=(k6); SCRIPT_DIR="$HERE"
@@ -36,10 +37,12 @@ trap cleanup EXIT
 echo "== seeding $HOME_DIR ($SERVICES services, $AUDIT audit entries, $APPROVALS approvals)"
 python3 "$HERE/seed.py" seed --home "$HOME_DIR" --out "$OUT" \
   --services "$SERVICES" --audit "$AUDIT" --approvals "$APPROVALS"
+echo "$PW_A" | aegisq --home "$HOME_DIR" users add alice --role admin --password-stdin >/dev/null
+echo "$PW_B" | aegisq --home "$HOME_DIR" users add bob --role approver --password-stdin >/dev/null
 
 start_server() {
   [[ -n "$server_pid" ]] && kill "$server_pid" 2>/dev/null && wait "$server_pid" 2>/dev/null || true
-  AEGISQ_HOME="$HOME_DIR" AEGISQ_API_TOKENS="$TOKENS" aegisq serve --port "$PORT" >"$OUT/server.log" 2>&1 &
+  AEGISQ_HOME="$HOME_DIR" aegisq serve --port "$PORT" >"$OUT/server.log" 2>&1 &
   server_pid=$!
   for _ in $(seq 1 50); do curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && return; sleep 0.2; done
   echo "server did not start"; cat "$OUT/server.log"; exit 1
@@ -50,7 +53,7 @@ run() {
   local name="$1" script="$2"
   echo "== k6: $name"
   if "${K6[@]}" run --quiet \
-      -e BASE_URL="http://127.0.0.1:$PORT" -e TOKENS="$TOKENS" -e SMOKE="${SMOKE:-0}" \
+      -e BASE_URL="http://127.0.0.1:$PORT" -e USERS="$USERS" -e SMOKE="${SMOKE:-0}" \
       -e APPROVALS_FILE="$SCRIPT_DIR/out/approvals.json" \
       --summary-export "$SCRIPT_DIR/out/$name-summary.json" "$SCRIPT_DIR/$script"; then
     echo "-- $name: thresholds passed"

@@ -1,8 +1,7 @@
-"""Agent drivers. All call the same Toolbox, so the guardrails are identical:
+"""Agent drivers. Both call the same Toolbox, so the guardrails are identical:
 
-* ``ClaudePlanner`` - Claude chooses the next tool call (tool use via the Anthropic API).
-* ``LocalPlanner`` - an open model (e.g. Gemma 4) chooses the next tool call through any
-  OpenAI-compatible chat endpoint: the Gemini API, or Ollama / LM Studio / llama.cpp / vLLM.
+* ``GemmaPlanner`` - Gemma 4 chooses the next tool call, through Google's Gemini API or a Gemma 4
+  running on your own machine (Ollama, LM Studio, llama.cpp or vLLM).
 * ``RulesPlanner`` - a deterministic driver for air-gapped sites, CI and fallback.
 """
 
@@ -24,6 +23,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from aegisq.agent import guardrails as gr
+from aegisq.agent import native
 from aegisq.agent.advice import advice_for
 from aegisq.agent.tools import Toolbox, ToolError
 from aegisq.config import AgentConfig
@@ -351,7 +351,7 @@ class RulesPlanner:
             call("rollback", service=name, reason="verification failed")
 
 
-# --------------------------------------------------------- Claude planner ---
+# ---------------------------------------------------------- system prompt ---
 
 SYSTEM_PROMPT = """You are AegisQ's migration agent. You move a fleet of TLS and SSH servers (web, proxy, mail and \
 SSH) to hybrid post-quantum key exchange (X25519MLKEM768 for TLS, mlkem768x25519-sha256 or sntrup761x25519 for SSH) \
@@ -376,92 +376,39 @@ Never apply anything without an approval. When every service has been handled, c
 a short summary per service: outcome, and for failures the root cause and the recommended fix."""
 
 
-class ClaudePlanner:
-    name = "claude"
-
-    def __init__(self, model: str, effort: str = "high", max_turns: int = 80, client: Any = None) -> None:
-        self.model = model
-        self.effort = effort
-        self.max_turns = max_turns
-        if client is None:
-            import anthropic
-
-            client = anthropic.Anthropic()
-        self.client = client
-
-    def _create(self, messages: list[dict[str, Any]]) -> Any:
-        return self.client.messages.create(
-            model=self.model,
-            max_tokens=16000,
-            system=SYSTEM_PROMPT,
-            tools=tool_specs(),
-            messages=messages,
-            thinking={"type": "adaptive"},
-            output_config={"effort": self.effort},
-            # Server-side fallback: if the model declines, the API reroutes the same request.
-            extra_headers={"anthropic-beta": "server-side-fallback-2026-07-01"},
-            extra_body={"fallbacks": "default"},
-        )
-
-    def run(self, tb: Toolbox, only: list[str] | None = None) -> RunSummary:
-        tb.ws.audit.append(
-            "agent.started", {"planner": self.name, "model": self.model, "services": only}, actor="agent"
-        )
-        task = "Migrate the fleet." if not only else f"Migrate only these services: {', '.join(only)}."
-        messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
-        calls = 0
-        final = ""
-        rolled: list[str] = []
-        try:
-            for _turn in range(self.max_turns):
-                resp = self._create(messages)
-                # Append the full content (thinking, fallback and tool_use blocks) unchanged.
-                messages.append({"role": "assistant", "content": resp.content})
-                if resp.stop_reason == "refusal":
-                    final = "The model declined to continue; no further changes were made."
-                    tb.ws.audit.append(
-                        "agent.refusal", {"details": str(getattr(resp, "stop_details", ""))}, actor="agent"
-                    )
-                    break
-                if resp.stop_reason == "tool_use":
-                    results = []
-                    for block in resp.content:
-                        if getattr(block, "type", None) != "tool_use":
-                            continue
-                        calls += 1
-                        out, err = run_tool_call(tb, only, block.name, block.input)
-                        results.append(
-                            {"type": "tool_result", "tool_use_id": block.id, "content": out, "is_error": err}
-                        )
-                    messages.append({"role": "user", "content": results})
-                    continue
-                if resp.stop_reason in ("max_tokens", "pause_turn"):
-                    messages.append({"role": "user", "content": "Continue."})
-                    continue
-                final = "\n".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
-                break
-            else:
-                final = f"Stopped after {self.max_turns} turns."
-        finally:
-            rolled = tb.finalize()
-        summary = _summarize(tb, self.name, final, calls, rolled)
-        tb.ws.audit.append(
-            "agent.finished",
-            {"planner": self.name, "outcomes": summary.outcomes, "final_message": final[:4000]},
-            actor="agent",
-        )
-        return summary
-
-
-# ---------------------------------------------------------- local planner ---
+# ---------------------------------------------------------- Gemma planner ---
 
 GEMINI_OPENAI_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 OLLAMA_URL = "http://127.0.0.1:11434/v1"
+GEMINI_MODEL = "gemma-4-31b-it"
+GEMINI_FALLBACKS = {
+    "gemma-4-31b-it": ("gemma-4-26b-a4b-it",),
+    "gemma-4-26b-a4b-it": ("gemma-4-31b-it",),
+}  # Gemma 4 31B on Google's Gemini API
+OLLAMA_MODEL = "gemma4:e4b"  # Gemma 4 E4B, pulled with `ollama pull gemma4:e4b`; set AEGISQ_LLM_MODEL for 12b/26b/31b
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 _THOUGHT_RE = re.compile(r"<thought>.*?</thought>", re.S)
 # Gemini puts the wait in the body ("Please retry in 33.02s" / "retryDelay": "33s"), not in Retry-After.
 _RETRY_HINT_RE = re.compile(r'(?:retry in|"retryDelay":\s*")\s*([0-9]+(?:\.[0-9]+)?)\s*s', re.I)
 _MAX_RETRY_WAIT_S = 90.0
+_SYSTEM_REFUSED_RE = re.compile(r"developer instruction|system (?:role|instruction|message)", re.I)
+
+
+def fold_system(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Move system messages into the first user message, for endpoints without a system role."""
+    system = "\n\n".join(str(m.get("content", "")) for m in messages if m.get("role") == "system")
+    rest = [dict(m) for m in messages if m.get("role") != "system"]
+    if not system:
+        return rest
+    for m in rest:
+        if m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, list):
+                m["content"] = [{"type": "text", "text": system}, *c]
+            else:
+                m["content"] = f"{system}\n\n{c}"
+            return rest
+    return [{"role": "user", "content": system}, *rest]
 
 
 def _retry_delay(retry_after: str | None, body: str, attempt: int) -> float:
@@ -482,11 +429,13 @@ class LocalEndpoint:
     base_url: str
     model: str
     api_key: str | None
+    api: str = "openai"
+    fallback_models: tuple[str, ...] = ()
 
     @property
     def label(self) -> str:
         host = urllib.parse.urlsplit(self.base_url).hostname or "?"
-        return f"{self.model} @ {host}"
+        return f"{self.model} @ {host}" + (" (native API)" if self.api == "native" else "")
 
 
 def _gemini_key() -> str | None:
@@ -506,7 +455,7 @@ def resolve_local_endpoint(cfg: AgentConfig) -> LocalEndpoint:
     """Where --planner local sends requests. Environment variables win over the config file."""
     gem_key = _gemini_key()
     base = (
-        os.environ.get("AEGISQ_LLM_BASE_URL") or cfg.local_base_url or (GEMINI_OPENAI_URL if gem_key else OLLAMA_URL)
+        os.environ.get("AEGISQ_LLM_BASE_URL") or cfg.base_url or (GEMINI_OPENAI_URL if gem_key else OLLAMA_URL)
     ).rstrip("/")
     parts = urllib.parse.urlsplit(base)
     if parts.scheme not in ("http", "https") or not parts.hostname:
@@ -518,7 +467,21 @@ def resolve_local_endpoint(cfg: AgentConfig) -> LocalEndpoint:
             raise RuntimeError("the Gemini API needs GEMINI_API_KEY (get one at https://aistudio.google.com/apikey)")
     if key and parts.scheme == "http" and not _is_loopback(parts.hostname):
         raise RuntimeError(f"refusing to send an API key over plain http to {parts.hostname}; use https")
-    return LocalEndpoint(base, os.environ.get("AEGISQ_LLM_MODEL") or cfg.local_model, key)
+    model = os.environ.get("AEGISQ_LLM_MODEL") or cfg.model
+    google = parts.hostname == "generativelanguage.googleapis.com"
+    if not model:
+        model = GEMINI_MODEL if google else OLLAMA_MODEL
+    api = (os.environ.get("AEGISQ_LLM_API") or ("native" if google else "openai")).lower()
+    if api not in ("openai", "native"):
+        raise RuntimeError(f"AEGISQ_LLM_API must be 'openai' or 'native', got {api!r}")
+    if api == "native" and not google:
+        raise RuntimeError("AEGISQ_LLM_API=native only works with the Gemini API")
+    raw = os.environ.get("AEGISQ_LLM_FALLBACK_MODELS")
+    if raw is None:
+        fallbacks = tuple(m for m in GEMINI_FALLBACKS.get(model, ()) if google)
+    else:
+        fallbacks = tuple(m.strip() for m in raw.split(",") if m.strip() and m.strip() != model)
+    return LocalEndpoint(base, model, key, api, fallbacks)
 
 
 def openai_tool_specs() -> list[dict[str, Any]]:
@@ -531,14 +494,19 @@ def openai_tool_specs() -> list[dict[str, Any]]:
     ]
 
 
-class LocalPlanner:
-    """An open model drives the toolbox through an OpenAI-compatible ``/chat/completions`` endpoint.
+class _Busy(Exception):
+    def __init__(self, why: str, retry_after: str | None, text: str) -> None:
+        super().__init__(why)
+        self.why, self.retry_after, self.text = why, retry_after, text
 
-    Works with Gemma 4 on the Gemini API and with any model served by Ollama, LM Studio, llama.cpp or vLLM
-    that supports tool calling. The guardrails are the same as for Claude because they live in the tools.
+
+class GemmaPlanner:
+    """Gemma 4 drives the toolbox through an OpenAI-compatible ``/chat/completions`` endpoint: Google's
+    Gemini API, or a local server (Ollama, LM Studio, llama.cpp, vLLM). The guardrails live in the tools,
+    so they are the same as for the rules planner.
     """
 
-    name = "local"
+    name = "gemma"
 
     def __init__(
         self,
@@ -553,33 +521,82 @@ class LocalPlanner:
         self.timeout = timeout
         self.retries = retries
         self._post = post or self._http_post
+        self._fold_system = False
+        self._preferred = endpoint.model
+        self.models_used: set[str] = set()
 
     def _http_post(self, body: dict[str, Any]) -> dict[str, Any]:
-        url = self.endpoint.base_url + "/chat/completions"
+        """One model call. A busy model (429/5xx, no connection) hands over to the next Gemma 4 model at once;
+        when every model is busy, wait (Google's retry hint, else backoff) and go round again."""
+        attempt = 0
+        while True:
+            busy: list[str] = []
+            delay = 0.0
+            for model in self._model_order():
+                try:
+                    out = self._send_once(model, body)
+                except _Busy as b:
+                    busy.append(f"{model}: {b.why}")
+                    delay = max(delay, _retry_delay(b.retry_after, b.text, attempt))
+                    log.warning("Gemma 4: %s is busy (%s)", model, b.why)
+                    continue
+                if model != self._preferred:
+                    log.warning("Gemma 4: using %s while %s is busy", model, self._preferred)
+                    self._preferred = model
+                self.models_used.add(model)
+                out["model"] = model
+                return out
+            if attempt == self.retries:
+                if all("cannot connect" in b for b in busy):
+                    raise RuntimeError(f"cannot reach {self.endpoint.base_url}: {'; '.join(busy)}")
+                raise RuntimeError(f"{self.endpoint.label}: every model is busy: {'; '.join(busy)}")
+            log.warning("Gemma 4: every model is busy, retrying in %.0fs (attempt %d)", delay, attempt + 1)
+            time.sleep(delay)
+            attempt += 1
+
+    def _model_order(self) -> list[str]:
+        models = list(dict.fromkeys([self.endpoint.model, *self.endpoint.fallback_models]))
+        return [self._preferred, *(m for m in models if m != self._preferred)]
+
+    def _native_url(self, model: str) -> str:
+        quoted = urllib.parse.quote(model, safe="-._")
+        return f"{native.native_base(self.endpoint.base_url)}/models/{quoted}:generateContent"
+
+    def _send_once(self, model: str, body: dict[str, Any]) -> dict[str, Any]:
+        is_native = self.endpoint.api == "native"
         headers = {"Content-Type": "application/json"}
         if self.endpoint.api_key:
-            headers["Authorization"] = f"Bearer {self.endpoint.api_key}"
-        data = json.dumps(body).encode()
-        for attempt in range(self.retries + 1):
+            if is_native:
+                headers["x-goog-api-key"] = self.endpoint.api_key
+            else:
+                headers["Authorization"] = f"Bearer {self.endpoint.api_key}"
+        url = self._native_url(model) if is_native else self.endpoint.base_url + "/chat/completions"
+        for _ in range(2):
+            payload: dict[str, Any] = {**body, "model": model}
+            if self._fold_system and not is_native:
+                payload["messages"] = fold_system(payload.get("messages", []))
+            data = json.dumps(native.to_native(payload) if is_native else payload).encode()
             req = urllib.request.Request(url, data=data, headers=headers, method="POST")  # noqa: S310 - scheme checked
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310
                     parsed: dict[str, Any] = json.load(resp)
-                    return parsed
+                    return native.from_native(parsed) if is_native else parsed
             except urllib.error.HTTPError as e:
                 text = e.read().decode("utf-8", "replace")
-                if e.code not in _RETRY_STATUS or attempt == self.retries:
-                    raise RuntimeError(f"{self.endpoint.label}: HTTP {e.code}: {text[:500]}") from None
-                delay = _retry_delay(e.headers.get("Retry-After"), text, attempt)
-                why = "rate limited" if e.code == 429 else f"HTTP {e.code}"
+                if e.code == 400 and _SYSTEM_REFUSED_RE.search(text) and not self._fold_system and not is_native:
+                    # Some Gemma deployments reject the system role; send the same instructions as user text.
+                    self._fold_system = True
+                    log.warning("Gemma 4: endpoint rejects system messages; folding them into the user turn")
+                    continue
+                if e.code in _RETRY_STATUS:
+                    why = "rate limited" if e.code == 429 else f"HTTP {e.code}"
+                    raise _Busy(why, e.headers.get("Retry-After"), text) from None
+                raise RuntimeError(
+                    f"{model} @ {urllib.parse.urlsplit(url).hostname}: HTTP {e.code}: {text[:500]}"
+                ) from None
             except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
-                if attempt == self.retries:
-                    raise RuntimeError(f"cannot reach {self.endpoint.base_url}: {e}") from None
-                delay = _retry_delay(None, "", attempt)
-                why = "connection failed"
-            log.warning("local planner: %s, retrying in %.0fs (attempt %d)", why, delay, attempt + 1)
-            time.sleep(delay)
-        raise AssertionError("unreachable")
+                raise _Busy(f"cannot connect: {e}", None, "") from None
+        raise RuntimeError("the endpoint rejected the request twice")
 
     def _create(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         return self._post(
@@ -665,34 +682,55 @@ class LocalPlanner:
         summary = _summarize(tb, self.name, final, calls, rolled)
         tb.ws.audit.append(
             "agent.finished",
-            {"planner": self.name, "outcomes": summary.outcomes, "final_message": final[:4000]},
+            {
+                "planner": self.name,
+                "outcomes": summary.outcomes,
+                "final_message": final[:4000],
+                "models_used": sorted(self.models_used),
+            },
             actor="agent",
         )
         return summary
 
 
-Planner = RulesPlanner | ClaudePlanner | LocalPlanner
+Planner = RulesPlanner | GemmaPlanner
 
 
-def _has_anthropic_creds() -> bool:
-    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+def _ollama_models(base_url: str = OLLAMA_URL, timeout: float = 0.5) -> list[str] | None:
+    """Model names a local Ollama serves, or None when nothing answers."""
+    root = base_url.rstrip("/").removesuffix("/v1")
+    try:
+        with urllib.request.urlopen(root + "/api/tags", timeout=timeout) as r:  # noqa: S310 - loopback URL
+            data = json.loads(r.read(1_000_000))
+    except (OSError, ValueError):
+        return None
+    return [str(m.get("name", "")) for m in data.get("models", []) if isinstance(m, dict)]
+
+
+def gemma_status(cfg: AgentConfig) -> tuple[bool, str]:
+    """Can the Gemma 4 planner run here? (ok, what it will use or what to do)."""
+    try:
+        ep = resolve_local_endpoint(cfg)
+    except RuntimeError as e:
+        return False, str(e)
+    if ep.api_key or os.environ.get("AEGISQ_LLM_BASE_URL") or cfg.base_url:
+        return True, ep.label
+    models = _ollama_models(ep.base_url)
+    if models is None:
+        return False, "set GEMINI_API_KEY, or install Ollama and run `ollama pull gemma4:e4b`"
+    if not any(m == ep.model or (":" not in ep.model and m.split(":")[0] == ep.model) for m in models):
+        return False, f"Ollama is running but has no {ep.model}: run `ollama pull {ep.model}`"
+    return True, f"{ep.model} on this machine (Ollama)"
 
 
 def choose_planner(kind: str, cfg: AgentConfig) -> Planner:
-    if kind == "auto":
-        if _has_anthropic_creds():
-            kind = "claude"
-        elif _gemini_key() or os.environ.get("AEGISQ_LLM_BASE_URL"):
-            kind = "local"
-        else:
-            kind = "rules"
-    if kind == "claude":
-        try:
-            return ClaudePlanner(model=cfg.model, effort=cfg.effort, max_turns=cfg.max_turns)
-        except ImportError as e:
-            raise RuntimeError("the claude planner needs the 'anthropic' package: pip install 'aegisq[agent]'") from e
+    """auto: Gemma 4 when it is available (GEMINI_API_KEY, AEGISQ_LLM_BASE_URL or a local Ollama), else rules."""
     if kind == "local":
-        return LocalPlanner(resolve_local_endpoint(cfg), max_turns=cfg.max_turns)
+        kind = "gemma"
+    if kind == "auto":
+        kind = "gemma" if gemma_status(cfg)[0] else "rules"
+    if kind == "gemma":
+        return GemmaPlanner(resolve_local_endpoint(cfg), max_turns=cfg.max_turns)
     if kind == "rules":
         return RulesPlanner()
     raise ValueError(f"unknown planner {kind!r}")

@@ -69,6 +69,9 @@ def migration_years(scan: ServiceScan, cfg: RiskConfig) -> tuple[float, str]:
         return m["tls12_only"], "TLS 1.2 only: TLS upgrade before any PQ change"
     if scan.service.protocol == Protocol.SSH:
         return m["ssh_classical"], "OpenSSH upgrade or KexAlgorithms change"
+    blocker = scan.service.stack.get("blocker")
+    if blocker:
+        return m["classical_old_stack"], f"{blocker} cannot use ML-KEM: upgrade first"
     modern = _openssl_known_modern(scan.service.stack)
     if modern is True:
         return m["classical_modern_stack"], "TLS 1.3 on OpenSSL 3.5+: one config line"

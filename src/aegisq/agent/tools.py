@@ -182,11 +182,15 @@ class Toolbox:
                     return p
         return None
 
-    def _learn_stack(self, service: str, openssl: str | None) -> None:
-        if not openssl:
+    def _learn_stack(self, service: str, openssl: str | None, blocker: str | None = None) -> None:
+        """Remember why a server cannot be fixed by config, so risk scores and the dashboard say so."""
+        if not openssl and not blocker:
             return
         facts = self.ws.load_json("facts.json") or {}
-        facts.setdefault(service, {})["openssl"] = openssl
+        if openssl:
+            facts.setdefault(service, {})["openssl"] = openssl
+        if blocker:
+            facts.setdefault(service, {})["blocker"] = blocker
         self.ws.save_json("facts.json", facts)
 
     # ------------------------------------------------------------ tools
@@ -275,6 +279,7 @@ class Toolbox:
             ver = t.version()
             gate = dg.server_too_old(t.kind, ver.output if ver and ver.ok else "")
             if gate is not None:
+                self._learn_stack(service, None, blocker=f"Postfix {(ver.output if ver else '').strip()[:20]}")
                 self._audit("patch.refused_server_version", service=service, diagnosis=gate.to_dict())
                 self.state[service].outcome = "failed"
                 raise ToolError(f"{gate.root_cause} {gate.recommendation} Nothing was changed.") from None

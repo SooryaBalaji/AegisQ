@@ -1,196 +1,162 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AuthError, loadToken, makeApi, saveToken, startJob } from "./api.js";
-import Login from "./Login.jsx";
-import Overview from "./Overview.jsx";
-import Approvals from "./Approvals.jsx";
-import Measure from "./Measure.jsx";
-import Settings from "./Settings.jsx";
-import Audit from "./Audit.jsx";
-import Landing from "./aq/Landing.jsx";
-import Console from "./aq/Console.jsx";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AuthError, api } from "./api.js";
+import { useTheme } from "./theme.js";
+import { Mark, useToast } from "./ui.jsx";
+import Landing from "./home/Landing.jsx";
+import SignIn from "./pages/SignIn.jsx";
+import Overview from "./pages/Overview.jsx";
+import Run from "./pages/Run.jsx";
+import Claims from "./pages/Claims.jsx";
+import Approvals from "./pages/Approvals.jsx";
+import Performance from "./pages/Performance.jsx";
+import Audit from "./pages/Audit.jsx";
+import Settings from "./pages/Settings.jsx";
 
-const TABS = [
-  ["overview", "Overview"], ["approvals", "Approvals"], ["measure", "Performance"], ["audit", "Audit log"],
-];
-const TAB_OF = { "": "overview", overview: "overview", top: "overview", risk: "overview", approvals: "approvals", measure: "measure", audit: "audit", settings: "settings" };
+const PAGES = ["overview", "run", "claims", "approvals", "performance", "audit", "settings"];
 
 function useHash() {
-  const read = () => location.hash.replace(/^#/, "");
+  const read = () => location.hash.replace(/^#\/?/, "");
   const [hash, setHash] = useState(read);
   useEffect(() => {
-    const on = () => setHash(read());
+    const on = () => { setHash(read()); window.scrollTo({ top: 0 }); };
     window.addEventListener("hashchange", on);
     return () => window.removeEventListener("hashchange", on);
   }, []);
   return hash;
 }
 
-function useHashTab() {
-  const read = () => TAB_OF[location.hash.replace(/^#/, "")] || "overview";
-  const [tab, setTab] = useState(read);
-  useEffect(() => {
-    const on = () => { setTab(read()); window.scrollTo({ top: 0 }); };
-    window.addEventListener("hashchange", on);
-    return () => window.removeEventListener("hashchange", on);
-  }, []);
-  return tab;
-}
-
 export default function App() {
-  const [token, setToken] = useState(loadToken);
-  const [me, setMe] = useState(null);
-  const who = me ? me.identity : null;
-  const [loginError, setLoginError] = useState("");
+  const [theme, setTheme] = useTheme();
   const hash = useHash();
+  const [me, setMe] = useState(undefined); // undefined: checking; null: signed out
 
-  const signOut = useCallback((msg = "") => {
-    saveToken(null); setToken(null); setMe(null); setLoginError(msg);
+  const refreshMe = useCallback(async () => {
+    try { setMe(await api("/api/me")); } catch { setMe(null); }
   }, []);
+  useEffect(() => { refreshMe(); }, [refreshMe]);
 
-  const client = useMemo(() => (token ? makeApi(token) : null), [token]);
+  const signOut = useCallback(async () => {
+    try { await api("/api/logout", { method: "POST" }); } catch { /* already signed out */ }
+    setMe(null);
+    location.hash = "#signin";
+  }, []);
+  const expired = useCallback(() => { setMe(null); location.hash = "#signin"; }, []);
 
-  useEffect(() => {
-    if (!client) return;
-    let live = true;
-    client.api("/api/me")
-      .then((m) => { if (live) setMe(m); })
-      .catch((e) => { if (live) signOut(e instanceof AuthError ? "Invalid token." : `Cannot reach AegisQ: ${e.message}`); });
-    return () => { live = false; };
-  }, [client, signOut]);
-
-  const signIn = (t) => { saveToken(t); setLoginError(""); setToken(t); };
-
-  useEffect(() => { document.body.classList.toggle("signed-out", !who); }, [who]);
-
-  if (hash === "intro") return <Landing signedIn={!!who} />;
-  if (hash === "console" || hash === "run") {
-    return <Console token={token} onSignIn={signIn} onSignOut={(msg) => signOut(msg)} />;
-  }
-  if (!client || !who) {
-    if (hash !== "signin" && !loginError && !token) return <Landing signedIn={false} />;
-    return (
-      <>
-        <NavShell />
-        <Login onSubmit={signIn} error={loginError} />
-      </>
-    );
-  }
-  return <Dashboard client={client} me={me} signOut={signOut} />;
+  if (me === undefined) return null;
+  const page = hash.split("/")[0];
+  if (page === "intro" || (page === "" && !me)) return <Landing signedIn={!!me} />;
+  if (!me) return <SignIn onSignedIn={(m) => { setMe(m); location.hash = "#overview"; }} />;
+  if (page === "signin") { location.hash = "#overview"; return null; }
+  return <Shell me={me} hash={hash} theme={theme} setTheme={setTheme} signOut={signOut} expired={expired} />;
 }
 
-function NavShell({ children }) {
-  return (
-    <div className="nav-wrap">
-      <header className="nav" aria-label="AegisQ">
-        <a className="wordmark" href="#intro" aria-label="AegisQ intro">AEGIS<span>Q</span></a>
-        {children}
-      </header>
-    </div>
-  );
-}
-
-function Dashboard({ client, me, signOut }) {
-  const who = me.identity;
+function Shell({ me, hash, theme, setTheme, signOut, expired }) {
+  const [page, sub] = hash.split("/");
+  const current = PAGES.includes(page) ? page : "overview";
   const perms = new Set(me.permissions || []);
-  const tabs = perms.has("admin") ? [...TABS, ["settings", "Settings"]] : TABS;
-  const tab = useHashTab();
-  const [z, setZ] = useState(10);
   const [overview, setOverview] = useState(null);
+  const [z, setZ] = useState(null);
   const [approvals, setApprovals] = useState([]);
-  const [audit, setAudit] = useState({ rows: [], verify: null });
-  const [jobs, setJobs] = useState([]);
-  const [benchmark, setBenchmark] = useState(null);
-  const seen = useRef({});
-  const zSet = useRef(false);
+  const [chain, setChain] = useState(null);
+  const [menu, setMenu] = useState(false);
+  const [toast, toastNode] = useToast();
+  const zRef = useRef(null);
+  zRef.current = z;
 
-  const guarded = useCallback(async (fn) => {
-    try { await fn(); } catch (e) {
-      if (e instanceof AuthError) signOut("Your token was rejected.");
-      else console.error(e);
+  const guard = useCallback(async (fn) => {
+    try { return await fn(); } catch (e) {
+      if (e instanceof AuthError) expired();
+      else toast(e.message);
+      return undefined;
     }
-  }, [signOut]);
+  }, [expired]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const loadOverview = useCallback(() => guarded(async () => {
-    const ov = await client.api("/api/overview");
-    if (!ov) return;
-    if (!zSet.current) { setZ(ov.z_default); zSet.current = true; }
-    setOverview(ov);
-  }), [client, guarded]);
-
-  const loadApprovals = useCallback(() => guarded(async () => setApprovals((await client.api("/api/approvals")) || [])), [client, guarded]);
-
-  const loadAudit = useCallback(() => guarded(async () => {
-    const [rows, verify] = await Promise.all([client.api("/api/audit?limit=60"), client.api("/api/audit/verify")]);
-    setAudit({ rows: rows || [], verify });
-  }), [client, guarded]);
-
-  const loadExtras = useCallback(() => guarded(async () => setBenchmark(await client.api("/api/benchmark"))), [client, guarded]);
-
-  const refreshResults = useCallback(() => {
-    loadOverview(); loadExtras(); loadAudit(); loadApprovals();
-  }, [loadOverview, loadExtras, loadAudit, loadApprovals]);
-
-  const loadJobs = useCallback(() => guarded(async () => {
-    const list = (await client.api("/api/jobs")) || [];
-    let finished = false;
-    for (const j of list) {
-      if (seen.current[j.id] === "running" && j.status !== "running") finished = true;
-      seen.current[j.id] = j.status;
+  const loadOverview = useCallback(() => guard(async () => {
+    const zq = zRef.current;
+    const ov = await api(zq == null ? "/api/overview" : `/api/overview?z=${zq}`);
+    if (ov) {
+      setOverview(ov);
+      if (zRef.current == null) setZ(ov.z_default);
     }
-    setJobs(list);
-    if (finished) refreshResults();
-  }), [client, guarded, refreshResults]);
+  }), [guard]);
+  const loadApprovals = useCallback(() => guard(async () => setApprovals((await api("/api/approvals")) || [])), [guard]);
+  const loadChain = useCallback(() => guard(async () => setChain(await api("/api/audit/verify"))), [guard]);
 
   useEffect(() => {
-    loadOverview().then(() => {
-      loadJobs(); loadApprovals(); loadAudit(); loadExtras();
-    });
-    const t = [
-      setInterval(loadJobs, 3000),
-      setInterval(loadApprovals, 3000),
-      setInterval(loadAudit, 5000),
-      setInterval(loadOverview, 15000),
-    ];
+    loadOverview(); loadApprovals(); loadChain();
+    const t = [setInterval(loadApprovals, 3000), setInterval(loadOverview, 15000), setInterval(loadChain, 15000)];
     return () => t.forEach(clearInterval);
-  }, [client, guarded, loadOverview, loadJobs, loadApprovals, loadAudit, loadExtras]);
+  }, [loadOverview, loadApprovals, loadChain]);
+
+  useEffect(() => { if (z != null) loadOverview(); }, [z]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setMenu(false); }, [hash]);
 
   const pending = approvals.filter((a) => a.status === "pending");
-  const ver = audit.verify;
-  const auditKind = ver && ver.ok ? "good" : "critical";
-  const auditText = ver ? (ver.ok ? `audit intact · ${ver.entries}` : "audit TAMPERED") : "audit …";
+  const ctx = { me, perms, guard, toast, overview, loadOverview, approvals, loadApprovals, loadChain, z, setZ, chain };
+
+  const nav = [
+    ["overview", "Overview"],
+    ["run", "Run"],
+    ["claims", "Check a claim"],
+    ["approvals", "Approvals", pending.length],
+    ["performance", "Performance"],
+    ["audit", "Audit log"],
+  ];
 
   return (
-    <>
-      <NavShell>
-        <nav className="nav-links" aria-label="Sections">
-          {tabs.slice(0, 1).map(([id, label]) => (
-            <a key={id} href={`#${id}`} aria-current={tab === id ? "page" : undefined}>{label}</a>
-          ))}
-          <a href="#console">Run</a>
-          {tabs.slice(1).map(([id, label]) => (
-            <a key={id} href={`#${id}`} aria-current={tab === id ? "page" : undefined}>
+    <div className="shell">
+      <aside className={`side ${menu ? "open" : ""}`} aria-label="Main">
+        <a className="brand" href="#intro" title="Play the intro">
+          <Mark />
+          <span className="brand-name">AegisQ</span>
+        </a>
+        <nav className="nav">
+          {nav.map(([id, label, n]) => (
+            <a key={id} href={`#${id}`} aria-current={current === id ? "page" : undefined}>
               {label}
-              {id === "approvals" && pending.length > 0 && <> <span className="count">{pending.length}</span></>}
+              {n > 0 && <span className="count" aria-label={`${n} waiting`}>{n}</span>}
             </a>
           ))}
+          <div className="nav-sep" />
+          <a href="#settings" aria-current={current === "settings" ? "page" : undefined}>Settings</a>
         </nav>
-        <div className="nav-right">
-          <span className="nav-who" title={`permissions: ${[...perms].join(", ")}`}>{who} · {me.role}</span>
-          <span className={`badge badge-dark s-${auditKind}`} title={ver && !ver.ok ? ver.error : `${ver ? (ver.keyed ? "HMAC" : "SHA-256") : ""} hash chain`}>{auditText}</span>
-          <button className="link-btn" type="button" onClick={() => signOut("")}>Sign out</button>
-          <a className="button pill" href="#" onClick={(e) => { e.preventDefault(); client.download(`/api/report.html?z=${z}`, "aegisq-report.html"); }}>Get the report</a>
+        <div className="side-foot">
+          <div className="chain" title={chain && !chain.ok ? chain.error : "Every event is hash-chained to the one before"}>
+            <span className={`dot ${chain ? (chain.ok ? "safe" : "risk") : "idle"}`} aria-hidden="true" />
+            {chain ? (chain.ok ? `Audit log verified, ${chain.entries} events` : "Audit log failed verification") : "Checking audit log"}
+          </div>
+          <div className="who">
+            <span className="avatar" aria-hidden="true">{me.identity.slice(0, 2)}</span>
+            <div className="who-text">
+              <div className="who-name">{me.identity}</div>
+              <div className="who-role">{me.role[0].toUpperCase() + me.role.slice(1)}</div>
+            </div>
+          </div>
+          <button type="button" className="btn small" onClick={signOut}>Sign out</button>
         </div>
-      </NavShell>
-      <main id="app">
-        {tab === "overview" && (
-          <Overview overview={overview} z={z} setZ={setZ} client={client} canRun={perms.has("run")}
-            onRescan={() => startJob(client, { kind: "scan" }, loadJobs, signOut)} />
-        )}
-        {tab === "approvals" && <Approvals client={client} approvals={approvals} reload={loadApprovals} me={me} />}
-        {tab === "measure" && <Measure benchmark={benchmark} client={client} jobs={jobs} loadJobs={loadJobs} signOut={signOut} canRun={perms.has("run")} />}
-        {tab === "settings" && perms.has("admin") && <Settings client={client} me={me} />}
-        {tab === "audit" && <Audit rows={audit.rows} />}
-      </main>
-    </>
+      </aside>
+      {menu && <div className="scrim" onClick={() => setMenu(false)} aria-hidden="true" />}
+      <div>
+        <div className="topbar">
+          <a className="brand" href="#overview">
+            <Mark />
+            <span className="brand-name">AegisQ</span>
+          </a>
+          <button type="button" className="btn small" onClick={() => setMenu(true)} aria-expanded={menu}>Menu</button>
+        </div>
+        <main className="main">
+          <div className="page">
+            {current === "overview" && <Overview {...ctx} />}
+            {current === "run" && <Run {...ctx} />}
+            {current === "claims" && <Claims {...ctx} />}
+            {current === "approvals" && <Approvals {...ctx} />}
+            {current === "performance" && <Performance {...ctx} />}
+            {current === "audit" && <Audit {...ctx} />}
+            {current === "settings" && <Settings {...ctx} section={sub} theme={theme} setTheme={setTheme} />}
+          </div>
+        </main>
+      </div>
+      {toastNode}
+    </div>
   );
 }

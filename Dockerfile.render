@@ -1,0 +1,25 @@
+# AegisQ on Render (or any host that mounts a root-owned disk): starts as root only to give the disk to the
+# aegisq user, then runs the dashboard as that user.
+FROM ubuntu:26.04 AS base
+ENV DEBIAN_FRONTEND=noninteractive PIP_NO_CACHE_DIR=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates openssl openssh-client curl \
+ && rm -rf /var/lib/apt/lists/*
+
+FROM base AS build
+COPY pyproject.toml README.md /src/
+COPY src /src/src
+RUN python3 -m venv /opt/aegisq \
+ && /opt/aegisq/bin/pip install --upgrade pip \
+ && /opt/aegisq/bin/pip install /src
+
+FROM base
+COPY --from=build /opt/aegisq /opt/aegisq
+COPY deploy/render-start.sh /usr/local/bin/aegisq-start
+RUN useradd --system --create-home --home-dir /var/lib/aegisq --shell /usr/sbin/nologin aegisq \
+ && chmod 755 /usr/local/bin/aegisq-start
+ENV PATH=/opt/aegisq/bin:$PATH AEGISQ_HOME=/var/lib/aegisq/workspace AEGISQ_BEHIND_PROXY=1
+WORKDIR /var/lib/aegisq
+EXPOSE 10000
+ENTRYPOINT ["aegisq-start"]
+CMD ["aegisq", "serve", "--host", "0.0.0.0"]

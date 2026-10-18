@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: aegisq
+    runtime: docker
+    dockerfilePath: ./Dockerfile.render
+    healthCheckPath: /healthz
+    envVars:
+      - key: AEGISQ_ADMIN_USER
+        sync: false
+      - key: AEGISQ_ADMIN_PASSWORD
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: AEGISQ_AUDIT_KEY
+        generateValue: true
+    disk:
+      name: aegisq-data
+      mountPath: /var/lib/aegisq/workspace
+      sizeGB: 1

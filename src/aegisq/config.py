@@ -1,6 +1,6 @@
 """Configuration: a YAML file (``--config`` / ``AEGISQ_CONFIG``) plus environment overrides.
 
-Secrets (API tokens, the audit HMAC key and model keys) are read from the
+Secrets (the audit HMAC key and the Gemini API key) are read from the
 environment only, never from the config file, so the file can be committed. For convenience
 the CLI also reads a ``.env`` file (see ``load_env_file``) into the environment.
 """
@@ -10,9 +10,10 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Years data must stay secret, by category. Illustrative defaults; set them from your retention policy.
 DEFAULT_RETENTION: dict[str, float] = {
@@ -87,13 +88,27 @@ class ScanConfig(BaseModel):
 
 class AgentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    model: str = "claude-opus-5-5"
-    # --planner local: any OpenAI-compatible chat endpoint (Gemini API, Ollama, LM Studio, llama.cpp, vLLM).
-    # Unset base URL: the Gemini API when GEMINI_API_KEY is set, else Ollama on this machine.
-    # Overridden by AEGISQ_LLM_BASE_URL / AEGISQ_LLM_MODEL; the key comes only from the environment.
-    local_model: str = Field(default="gemma-4-31b-it", min_length=1, max_length=200)
-    local_base_url: str | None = Field(default=None, pattern=r"^https?://")
-    effort: str = Field(default="high", pattern="^(low|medium|high|xhigh|max)$")
+    # Gemma 4 planner. Unset base_url: Google's Gemini API when GEMINI_API_KEY is set, else Ollama on this machine.
+    # Unset model: gemma-4-31b-it on the Gemini API, gemma4:e4b on Ollama. AEGISQ_LLM_BASE_URL / AEGISQ_LLM_MODEL
+    # override both; the key comes only from the environment.
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    base_url: str | None = Field(default=None, pattern=r"^https?://")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _older_keys(cls, data: Any) -> Any:
+        """Configs written for earlier versions: local_model / local_base_url were renamed; effort is gone."""
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        if "local_model" in data or "effort" in data:  # old layout: `model` named the removed hosted planner
+            data.pop("model", None)
+        for old, new in (("local_model", "model"), ("local_base_url", "base_url")):
+            if old in data:
+                data.setdefault(new, data.pop(old))
+        data.pop("effort", None)
+        return data
+
     max_turns: int = Field(default=80, ge=1, le=500)
     approval_timeout_s: float = Field(default=1800, gt=0)
     approval_ttl_s: float = Field(default=3600, gt=0)
@@ -201,29 +216,3 @@ def load_env_file(path: str | Path | None = None) -> tuple[Path, int] | None:
                 n += 1
         return f, n
     return None
-
-
-ROLE_NAMES = ("viewer", "operator", "approver", "admin")
-
-
-def api_tokens() -> dict[str, str]:
-    """Parse AEGISQ_API_TOKENS='alice:tok1,bob:tok2:approver' into {token: identity}.
-
-    The identity is the name, or ``name:role`` when a role is given (no role means admin)."""
-    raw = os.environ.get("AEGISQ_API_TOKENS", "").strip()
-    out: dict[str, str] = {}
-    for item in filter(None, (s.strip() for s in raw.split(","))):
-        parts = item.split(":")
-        if len(parts) not in (2, 3):
-            raise ValueError("AEGISQ_API_TOKENS entries must look like name:token or name:token:role")
-        name, tok = parts[0].strip(), parts[1]
-        if len(tok) < 16:
-            raise ValueError(f"API token for {name!r} is shorter than 16 characters")
-        if len(parts) == 3:
-            role = parts[2].strip().lower()
-            if role not in ROLE_NAMES:
-                raise ValueError(f"role for {name!r} must be one of {', '.join(ROLE_NAMES)}")
-            out[tok] = f"{name}:{role}"
-        else:
-            out[tok] = name
-    return out

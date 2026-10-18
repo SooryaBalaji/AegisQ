@@ -2,7 +2,7 @@
 // (approvals every 3 s, audit + chain check every 5 s, overview every 15 s).
 import http from "k6/http";
 import { sleep } from "k6";
-import { BASE, SMOKE, auth, ok } from "./lib.js";
+import { BASE, SMOKE, auth, ok, signIn } from "./lib.js";
 
 const VUS = Number(__ENV.VUS || (SMOKE ? 5 : 50));
 
@@ -28,13 +28,20 @@ export const options = {
   },
 };
 
+export function setup() {
+  return { sessions: signIn() };
+}
+
+let SESSIONS = [];
+
 function get(path, endpoint) {
-  const params = auth(__VU);
+  const params = auth(SESSIONS, __VU);
   params.tags = { endpoint };
   return ok(http.get(`${BASE}${path}`, params), endpoint);
 }
 
-export default function () {
+export default function (data) {
+  SESSIONS = data.sessions;
   const tick = __ITER;
   if (tick === 0) {
     ok(http.get(`${BASE}/`, { tags: { endpoint: "page" } }), "page");

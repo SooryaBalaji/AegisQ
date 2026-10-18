@@ -65,7 +65,7 @@ def synthetic_scan(n: int, rng: random.Random) -> ScanReport:
                 negotiated_kex="mlkem768x25519-sha256" if pq else None,
                 kex_algorithms=["mlkem768x25519-sha256", "curve25519-sha256"] if pq else ["curve25519-sha256"],
             )
-            results.append(ServiceScan(service=svc, status=status if status.scanned else status, ssh=det))
+            results.append(ServiceScan(service=svc, status=status, ssh=det))
             continue
         tls = TLSDetails(
             pq_ready=status == Status.PQ_READY,

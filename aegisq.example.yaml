@@ -1,7 +1,8 @@
 # AegisQ configuration. Secrets never go here: use the environment
-#   AEGISQ_API_TOKENS="alice:<token>,bob:<token>"   dashboard/API identities (>= 16 chars each)
-#   AEGISQ_AUDIT_KEY="<random>"                    HMAC key for the audit hash chain
-#   ANTHROPIC_API_KEY="<key>"                       enables the Claude planner
+#   AEGISQ_AUDIT_KEY="<random>"        HMAC key for the audit hash chain
+#   GEMINI_API_KEY="<key>"             Gemma 4 on Google's Gemini API (optional: Gemma 4 can also run in Ollama)
+#   AEGISQ_ADMIN_USER / AEGISQ_ADMIN_PASSWORD   first admin account, for containers (optional)
+# Dashboard users sign in with a name and password: `aegisq users add NAME --role admin`.
 home: .aegisq
 
 risk:
@@ -29,10 +30,8 @@ scan:
     deny: []
 
 agent:
-  model: claude-opus-5-5          # --planner claude (needs ANTHROPIC_API_KEY)
-  local_model: gemma-4-31b-it     # --planner local; with Ollama use the name `ollama list` shows
-  # local_base_url: http://127.0.0.1:11434/v1   # default: Gemini API if GEMINI_API_KEY is set, else Ollama
-  effort: high
+  # model: gemma-4-31b-it        # Gemma 4 model; default gemma-4-31b-it on the Gemini API, gemma4:e4b on Ollama
+  # base_url: http://127.0.0.1:11434/v1   # default: Gemini API if GEMINI_API_KEY is set, else Ollama here
   max_turns: 80
   approval_timeout_s: 1800     # how long request_approval waits for a human
   approval_ttl_s: 3600         # an approval must be used within this time

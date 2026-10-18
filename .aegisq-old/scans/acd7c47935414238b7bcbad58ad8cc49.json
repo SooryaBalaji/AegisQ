@@ -1,0 +1,86 @@
+{
+  "scan_id": "acd7c47935414238b7bcbad58ad8cc49",
+  "started_at": "2026-10-04T02:10:35.888212Z",
+  "finished_at": "2026-10-04T02:10:36.078623Z",
+  "tool_version": "1.0.0",
+  "backend": "tls=native,ssh=native",
+  "results": [
+    {
+      "service": {
+        "name": "github.com-22",
+        "host": "github.com",
+        "port": 22,
+        "protocol": "ssh",
+        "sni": null,
+        "data_category": "unknown",
+        "owner": null,
+        "tags": [],
+        "retention_years": null,
+        "migration_years": null,
+        "stack": {},
+        "managed": null
+      },
+      "status": "pq_ready",
+      "backend": "native",
+      "scanned_at": "2026-10-04T02:10:36.077604Z",
+      "duration_ms": 189.53,
+      "resolved_ip": "140.82.112.3",
+      "tls": null,
+      "ssh": {
+        "banner": "SSH-2.0-2097ddd",
+        "software": "2097ddd",
+        "kex_algorithms": [
+          "sntrup761x25519-sha512",
+          "sntrup761x25519-sha512@openssh.com",
+          "curve25519-sha256",
+          "curve25519-sha256@libssh.org",
+          "ecdh-sha2-nistp256",
+          "ecdh-sha2-nistp384",
+          "ecdh-sha2-nistp521",
+          "diffie-hellman-group-exchange-sha256"
+        ],
+        "host_key_algorithms": [
+          "ssh-ed25519",
+          "ecdsa-sha2-nistp256",
+          "rsa-sha2-512",
+          "rsa-sha2-256",
+          "ssh-rsa"
+        ],
+        "ciphers": [
+          "chacha20-poly1305@openssh.com",
+          "aes256-gcm@openssh.com",
+          "aes128-gcm@openssh.com",
+          "aes256-ctr",
+          "aes192-ctr",
+          "aes128-ctr"
+        ],
+        "macs": [
+          "hmac-sha2-512-etm@openssh.com",
+          "hmac-sha2-256-etm@openssh.com",
+          "hmac-sha2-512",
+          "hmac-sha2-256"
+        ],
+        "pq_ready": true,
+        "pq_kex_offered": [
+          "sntrup761x25519-sha512",
+          "sntrup761x25519-sha512@openssh.com"
+        ],
+        "negotiated_kex": "sntrup761x25519-sha512@openssh.com",
+        "weak_kex": [],
+        "weak_ciphers": [],
+        "weak_macs": [],
+        "weak_host_keys": [
+          "ssh-rsa"
+        ]
+      },
+      "errors": [],
+      "findings": [
+        "SHA-1/DSA host key algorithms enabled: ssh-rsa."
+      ]
+    }
+  ],
+  "environment": {
+    "python": "3.11.9",
+    "platform": "Windows-10"
+  }
+}

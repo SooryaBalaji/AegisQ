@@ -368,12 +368,11 @@ def _terminal_waiter(c: Ctx, approver: str) -> Any:
 @click.argument("inventory", type=click.Path(exists=True, dir_okay=False))
 @click.option(
     "--planner",
-    type=click.Choice(["auto", "claude", "local", "rules"]),
+    type=click.Choice(["auto", "gemma", "rules"]),
     default="auto",
     show_default=True,
-    help="claude = Claude chooses each tool call; local = an open model such as Gemma 4 (Gemini API, Ollama, "
-    "LM Studio, any OpenAI-compatible endpoint); rules = deterministic; auto = claude if ANTHROPIC_API_KEY is set, "
-    "else local if GEMINI_API_KEY or AEGISQ_LLM_BASE_URL is set, else rules.",
+    help="gemma = Gemma 4 chooses each tool call (Google's Gemini API with GEMINI_API_KEY, or Gemma 4 on this "
+    "machine through Ollama); rules = deterministic, no AI; auto = gemma when one of those is available, else rules.",
 )
 @click.option("--service", "services", multiple=True, help="Limit to these services (repeatable).")
 @click.option(
@@ -470,7 +469,7 @@ def migrate(
             click.echo(f"      {note}")
     if summary.safety_rollbacks:
         click.secho(f"  safety net rolled back: {', '.join(summary.safety_rollbacks)}", fg="red")
-    if summary.final_message and agent.name == "claude":
+    if summary.final_message and agent.name == "gemma":
         click.echo("\n" + summary.final_message)
     # Re-measure after the run, so the report's numbers are what the fleet looks like now.
     after = asyncio.run(
@@ -573,25 +572,33 @@ def _user_store(c: Ctx) -> Any:
     return UserStore(c.ws.home / "state.db")
 
 
+def _read_password(stdin: bool) -> str:
+    if stdin:
+        return sys.stdin.readline().rstrip("\r\n")
+    return str(click.prompt("Password", hide_input=True, confirmation_prompt=True))
+
+
 @users.command("add")
 @click.argument("name")
 @click.option("--role", type=click.Choice(["viewer", "operator", "approver", "admin"]), required=True)
+@click.option("--password-stdin", is_flag=True, help="Read the password from standard input instead of prompting.")
 @pass_ctx
-def users_add(c: Ctx, name: str, role: str) -> None:
-    """Create a user and print their login token (shown once)."""
+def users_add(c: Ctx, name: str, role: str, password_stdin: bool) -> None:
+    """Create a user who signs in with NAME and a password (at least 12 characters)."""
     try:
-        token = _user_store(c).add(name, role, created_by=f"cli:{getpass.getuser()}")
+        _user_store(c).add(name, role, _read_password(password_stdin), created_by=f"cli:{getpass.getuser()}")
     except ValueError as e:
         _fail(str(e))
     c.ws.audit.append("user.created", {"name": name, "role": role, "via": "cli"}, actor=getpass.getuser())
-    click.echo(f"{name} ({role}) created. Token, shown only once:\n{token}")
+    click.echo(f"{name} ({role}) can now sign in.")
 
 
 @users.command("list")
 @pass_ctx
 def users_list(c: Ctx) -> None:
-    for u in _user_store(c).list():
-        click.echo(f"{u.name:<24} {u.role}")
+    """List users and their roles."""
+    for u in _user_store(c).all():
+        click.echo(f"{u.name:<24} {u.role:<9} {'' if u.has_password else 'no password: run `aegisq users password`'}")
 
 
 @users.command("role")
@@ -600,33 +607,43 @@ def users_list(c: Ctx) -> None:
 @pass_ctx
 def users_role(c: Ctx, name: str, role: str) -> None:
     """Change a user's role."""
+    store = _user_store(c)
+    u = store.get(name)
+    if u is not None and u.role == "admin" and role != "admin" and store.count_admins() == 1:
+        _fail("at least one admin must remain")
     try:
-        _user_store(c).set_role(name, role)
+        store.set_role(name, role)
     except (LookupError, ValueError) as e:
         _fail(str(e))
     c.ws.audit.append("user.role_changed", {"name": name, "role": role, "via": "cli"}, actor=getpass.getuser())
     click.echo(f"{name} is now {role}")
 
 
-@users.command("token")
+@users.command("password")
 @click.argument("name")
+@click.option("--password-stdin", is_flag=True, help="Read the password from standard input instead of prompting.")
 @pass_ctx
-def users_token(c: Ctx, name: str) -> None:
-    """Issue a new token for a user (the old one stops working)."""
+def users_password(c: Ctx, name: str, password_stdin: bool) -> None:
+    """Set a new password for a user. Signs them out everywhere."""
     try:
-        token = _user_store(c).rotate(name)
-    except LookupError as e:
+        _user_store(c).set_password(name, _read_password(password_stdin))
+    except (LookupError, ValueError) as e:
         _fail(str(e))
-    c.ws.audit.append("user.token_rotated", {"name": name, "via": "cli"}, actor=getpass.getuser())
-    click.echo(f"New token for {name}, shown only once:\n{token}")
+    c.ws.audit.append("user.password_reset", {"name": name, "via": "cli"}, actor=getpass.getuser())
+    click.echo(f"New password set for {name}.")
 
 
 @users.command("remove")
 @click.argument("name")
 @pass_ctx
 def users_remove(c: Ctx, name: str) -> None:
+    """Remove a user. They are signed out at once."""
+    store = _user_store(c)
+    u = store.get(name)
+    if u is not None and u.role == "admin" and store.count_admins() == 1:
+        _fail("at least one admin must remain")
     try:
-        _user_store(c).remove(name)
+        store.remove(name)
     except LookupError as e:
         _fail(str(e))
     c.ws.audit.append("user.removed", {"name": name, "via": "cli"}, actor=getpass.getuser())
@@ -745,6 +762,217 @@ def benchmark(c: Ctx, url: str, n: int, method: str, curl_bin: str) -> None:
     click.secho(res["caveat"], fg="yellow")
 
 
+# --------------------------------------------------------------- claims ---
+
+VERDICT_STYLE = {"confirmed": "green", "contradicted": "red", "unverifiable": "yellow"}
+
+
+@main.group()
+def claims() -> None:
+    """Gemma 4 reads a config or screenshot; the scanner checks every claim it finds."""
+
+
+@claims.command("check")
+@click.option(
+    "--text", "text_file", type=click.File("r", encoding="utf-8"), help="Config or command output (- = stdin)."
+)
+@click.option(
+    "--image", "image_file", type=click.Path(exists=True, dir_okay=False), help="PNG, JPEG or WebP screenshot."
+)
+@click.option("--yes", is_flag=True, help="Scan every endpoint found, without asking one by one.")
+@click.option("--no-scan", is_flag=True, help="Only show what Gemma read.")
+@click.option("--json", "as_json", is_flag=True)
+@pass_ctx
+def claims_check(c: Ctx, text_file: Any, image_file: str | None, yes: bool, no_scan: bool, as_json: bool) -> None:
+    """Extract endpoints and key-exchange claims with Gemma 4, then prove or disprove each with a handshake."""
+    from aegisq.agent import claims as cl
+    from aegisq.netutil import Scope
+    from aegisq.scanner.engine import ScanOptions
+
+    text = text_file.read() if text_file else None
+    image = Path(image_file).read_bytes() if image_file else None
+    try:
+        post, ep = cl.gemma_client(c.cfg.agent, retries=3, timeout=180.0)
+        click.echo(f"reading with {ep.label}", err=True)
+        ext = cl.extract(post, ep.model, text=text, image=image, who=getpass.getuser())
+    except (cl.ClaimError, RuntimeError) as e:
+        _fail(str(e))
+    cl.record_extraction(c.ws, ext)
+    if not as_json:
+        if not ext.endpoints:
+            click.echo(f"no endpoints found. {ext.notes}".strip())
+        for i, ep_claim in enumerate(ext.endpoints):
+            mark = {True: "quoted from your text", False: "NOT found in your text", None: "from the image"}[
+                ep_claim.grounded
+            ]
+            click.echo(f"[{i}] {ep_claim.label:<34} {cl.claim_text(ep_claim)}")
+            click.echo(f"    evidence ({mark}): {ep_claim.evidence[:120]}")
+        for d in ext.dropped:
+            click.secho(f"    ignored: {d}", fg="yellow")
+    picked: list[int] = []
+    if not no_scan and ext.endpoints:
+        if yes:
+            picked = [i for i, x in enumerate(ext.endpoints) if x.grounded is not False]
+            for x in ext.endpoints:
+                if x.grounded is False:
+                    click.secho(f"    not scanning {x.label}: not found in your text", fg="yellow")
+        else:
+            picked = [i for i, x in enumerate(ext.endpoints) if click.confirm(f"scan {x.label}?", default=False)]
+    if picked:
+        sc = c.cfg.scan
+        opts = ScanOptions(
+            timeout=sc.timeout,
+            concurrency=sc.concurrency,
+            legacy_protocols=False,
+            scope=Scope(sc.scope.allow, sc.scope.deny),
+        )
+        try:
+            cl.verify(c.ws, ext, picked, opts, getpass.getuser())
+        except (cl.ClaimError, ValueError) as e:
+            _fail(str(e))
+    if as_json:
+        click.echo(ext.model_dump_json(indent=2))
+        return
+    for row in ext.checks or []:
+        click.echo(
+            f"{row['endpoint']:<34} "
+            + click.style(f"{row['verdict'].upper():<13}", fg=VERDICT_STYLE[row["verdict"]])
+            + f" claim: {row['claim']}; server: {row['observed']}"
+        )
+        if row.get("fix"):
+            click.echo(f"    fix: {row['fix']}")
+    click.echo(f"saved {c.ws.home / 'claims' / (ext.id + '.json')}")
+    if ext.scan_file:
+        click.echo(f"CBOM for this check: aegisq cbom --scan {c.ws.home / ext.scan_file}")
+
+
+@main.command("gemma-check")
+@click.option(
+    "--api",
+    type=click.Choice(["configured", "native", "openai", "both"]),
+    default="configured",
+    show_default=True,
+    help="Gemini API only: test the native generateContent method, the OpenAI-compatible one, or both.",
+)
+@pass_ctx
+def gemma_check(c: Ctx, api: str) -> None:
+    """Send three real requests to Gemma 4 (tool call, image, claim extraction) and report each."""
+    import dataclasses
+
+    from aegisq.agent.gemma_check import run_checks
+    from aegisq.agent.runner import GemmaPlanner, resolve_local_endpoint
+
+    try:
+        base = resolve_local_endpoint(c.cfg.agent)
+    except RuntimeError as e:
+        _fail(str(e))
+    apis = [base.api] if api == "configured" else ["native", "openai"] if api == "both" else [api]
+    google = "generativelanguage.googleapis.com" in base.base_url
+    if not google and apis != ["openai"]:
+        _fail("--api native and --api both need the Gemini API (GEMINI_API_KEY)")
+    runs: list[dict[str, Any]] = []
+    for a in apis:
+        ep = dataclasses.replace(base, api=a)
+        click.echo(f"checking {ep.label}")
+        results = run_checks(GemmaPlanner(ep, retries=2, timeout=180.0)._http_post, ep.model)
+        for r in results:
+            mark = click.style("pass", fg="green") if r["ok"] else click.style("FAIL", fg="red")
+            click.echo(f"{mark}  {r['check']:<18} {r['seconds']:>6.1f}s  {r['detail']}")
+        runs.append({"model": ep.model, "endpoint": ep.base_url, "api": a, "results": results})
+        c.ws.audit.append("gemma.checked", runs[-1])
+    best = next((r for r in runs if all(x["ok"] for x in r["results"])), runs[0])
+    c.ws.save_json("gemma-check.json", {**best, "runs": runs})
+    if not all(x["ok"] for x in best["results"]):
+        sys.exit(1)
+    if len(runs) > 1 or best["api"] != base.api:
+        click.echo(f"use it: AEGISQ_LLM_API={best['api']}")
+
+
+@main.command("brief")
+@click.argument("service")
+@click.option("--template", is_flag=True, help="Do not use Gemma 4: list the facts as the brief.")
+@click.option("--json", "as_json", is_flag=True, help="Print the brief as JSON.")
+@click.option("-o", "--out", type=click.Path(dir_okay=False, writable=True), help="Also write the Markdown here.")
+@pass_ctx
+def brief_cmd(c: Ctx, service: str, template: bool, as_json: bool, out: str | None) -> None:
+    """Write a fact-checked brief for the team that owns SERVICE (from the latest scan)."""
+    from aegisq.agent import brief
+    from aegisq.agent.claims import gemma_client
+    from aegisq.agent.tools import apply_facts
+
+    report = c.ws.latest_scan()
+    if report is None:
+        _fail("no scan yet: run `aegisq scan` first")
+    scan = next((s for s in apply_facts(report.results, c.ws) if s.service.name == service), None)
+    if scan is None:
+        _fail(f"no service named {service!r} in the latest scan")
+    post = model = None
+    from aegisq.agent.runner import gemma_status
+
+    ready, why = (False, "") if template else gemma_status(c.cfg.agent)
+    if not template and not ready:
+        click.secho(f"Gemma 4 is not set up ({why}); using the template", fg="yellow", err=True)
+    if ready:
+        try:
+            post, ep = gemma_client(c.cfg.agent, retries=3, timeout=180.0)
+            model = ep.model
+            click.echo(f"writing with {ep.label}", err=True)
+        except RuntimeError as e:
+            click.secho(f"Gemma 4 is not set up ({e}); using the template", fg="yellow", err=True)
+    b = brief.write(c.ws, scan, c.cfg.risk, post, model, who=getpass.getuser())
+    md = b.markdown()
+    if out:
+        Path(out).write_text(md)
+    if as_json:
+        click.echo(json.dumps(b.to_dict(), indent=2))
+    else:
+        click.echo(md)
+        if b.removed:
+            click.secho(f"{len(b.removed)} sentence(s) removed by the fact check", fg="yellow", err=True)
+
+
+@main.command("redteam")
+@click.option(
+    "--planner",
+    type=click.Choice(["scripted", "gemma"]),
+    default="scripted",
+    show_default=True,
+    help="scripted: a model that obeys a prompt injection. gemma: the real Gemma 4 planner.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the full result as JSON.")
+@pass_ctx
+def redteam_cmd(c: Ctx, planner: str, as_json: bool) -> None:
+    """Attack a throwaway sandbox fleet and check, in code, that every unsafe action was refused."""
+    from aegisq.agent import redteam
+    from aegisq.agent.runner import resolve_local_endpoint
+
+    ep = None
+    if planner == "gemma":
+        try:
+            ep = resolve_local_endpoint(c.cfg.agent)
+        except RuntimeError as e:
+            _fail(str(e))
+        click.echo(f"red-teaming {ep.label} in a temporary sandbox", err=True)
+    result = redteam.run(planner, ep)
+    c.ws.save_json("redteam.json", result)
+    c.ws.audit.append(
+        "redteam.finished",
+        {k: result[k] for k in ("planner", "model", "tool_calls", "invariants", "passed")},
+    )
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+    else:
+        for r in result["attacks"]:
+            mark = click.style("refused", fg="green") if r["refused"] else click.style("ALLOWED", fg="red")
+            click.echo(f"{mark}  {r['attack']:<42} {r['detail']}")
+        click.echo("")
+        for name, ok in result["invariants"].items():
+            click.echo(f"{click.style('pass', fg='green') if ok else click.style('FAIL', fg='red')}  {name}")
+        click.echo(f"{result['tool_calls']} tool calls; saved {c.ws.home / 'redteam.json'}")
+    if not result["passed"]:
+        sys.exit(1)
+
+
 # --------------------------------------------------------------- doctor ---
 
 
@@ -792,41 +1020,28 @@ def doctor(c: Ctx) -> None:
         "curl benchmark",
         "curl with OpenSSL 3.5+" if curl_supports_mlkem() else "use --method native or the container",
     )
-    try:
-        __import__("anthropic")
-        line(True, "claude planner", "anthropic installed")
-    except ImportError:
-        line(None, "claude planner", "pip install 'aegisq[agent]'")
-    line(
-        bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")) or None,
-        "Anthropic credentials",
-        "set" if os.environ.get("ANTHROPIC_API_KEY") else "not set: use --planner local or rules",
-    )
-    from aegisq.agent.runner import resolve_local_endpoint
+    from aegisq.agent.runner import gemma_status
 
-    try:
-        ep = resolve_local_endpoint(c.cfg.agent)
-        if ep.api_key or os.environ.get("AEGISQ_LLM_BASE_URL") or c.cfg.agent.local_base_url:
-            line(True, "local planner", ep.label)
-        else:
-            line(
-                None, "local planner", f"{ep.label} (Ollama default; set GEMINI_API_KEY for Gemma 4 on the Gemini API)"
-            )
-    except RuntimeError as e:
-        line(None, "local planner", str(e))
+    ok, detail = gemma_status(c.cfg.agent)
+    line(ok or None, "Gemma 4 planner", detail)
+    last = c.ws.load_json("gemma-check.json")
+    if last:
+        passed = sum(1 for r in last["results"] if r["ok"])
+        line(
+            passed == len(last["results"]),
+            "Gemma 4 live check",
+            f"{passed}/{len(last['results'])} passed on {last['model']} ({last.get('api', 'openai')} API)",
+        )
+    else:
+        line(None, "Gemma 4 live check", "not run yet: `aegisq gemma-check`")
     line(bool(shutil.which("git")) or None, "git (patch branches)", shutil.which("git") or "not found")
     line(bool(shutil.which("docker")) or None, "docker (demo fleet)", shutil.which("docker") or "not found")
-    from aegisq.config import api_tokens
-
-    try:
-        toks = api_tokens()
-        line(
-            bool(toks) or None,
-            "dashboard API tokens",
-            f"{len(toks)} configured" if toks else "none: `serve` will generate a one-time token",
-        )
-    except ValueError as e:
-        line(False, "dashboard API tokens", str(e))
+    n_users = _user_store(c).count()
+    line(
+        bool(n_users) or None,
+        "dashboard users",
+        f"{n_users} can sign in" if n_users else "none yet: open the dashboard on this computer or `aegisq users add`",
+    )
     line(
         bool(os.environ.get("AEGISQ_AUDIT_KEY")) or None,
         "audit HMAC key",
